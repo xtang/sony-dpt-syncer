@@ -3,7 +3,7 @@ const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = { view: 'notes', filter: 'all', notes: [], selected: null, detail: null, app: null, files: [], fileSelection: new Set(), folders: [], folderDraft: [], folderDirty: false, editing: false, seenJobs: new Set(), initialized: false, searchRequest: 0 };
-Object.assign(state,{noteMode:'documents',channels:[],channel:null,channelRequest:0,detailRequest:0,historyAnswer:null,reading:new Set()});
+Object.assign(state,{noteMode:'documents',channels:[],channel:null,channelRequest:0,detailRequest:0,historyAnswer:null,reading:new Set(),notesFor:null,collapsedChannel:null,navHTML:''});
 try { if (window.localStorage?.getItem('dpt-note-mode')==='timeline') state.noteMode='timeline'; } catch (_) { /* Browser storage is optional. */ }
 const inFolders = (path, folders) => folders.some(root => path === root || path.startsWith(root+'/'));
 const statusLabels = { pending:'待识别', recognized:'待解读', needs_review:'待确认', answered:'已解答', error:'处理失败' };
@@ -31,12 +31,17 @@ async function job(path, body = {}) {
 }
 function badge(note) {
   if (note.ignored) return '<span class="badge pending">已忽略</span>';
-  let style = note.status === 'needs_review' ? 'review' : note.status === 'error' ? 'error' : note.status === 'answered' ? '' : 'pending';
-  return `<span class="badge ${style}">${esc(statusLabels[note.status] || note.status)}</span>${note.unread ? '<span class="badge unread">新回复</span>' : ''}`;
+  if (note.status === 'answered') return '';
+  const style = note.status === 'needs_review' ? 'review' : note.status === 'error' ? 'error' : 'pending';
+  return `<span class="badge ${style}">${esc(statusLabels[note.status] || note.status)}</span>`;
 }
 function stat(number, label) { return `<div class="stat"><strong>${esc(number)}</strong><span>${esc(label)}</span></div>`; }
 function renderStats(counts) {
-  $('#stats').innerHTML = stat(counts.notes,'已归档笔记')+stat(counts.answered,'已有解答')+stat(counts.needs_review,'待确认笔迹')+stat(counts.unread,'条新回复');
+  for (const [filter,key] of [['all','notes'],['unread','unread'],['pending','pending'],['needs_review','needs_review'],['ignored','ignored']]) {
+    const value=Number(counts[key])||0, item=$('#count-'+filter);
+    item.textContent=filter==='all' || value ? String(value) : '';
+    item.classList.toggle('hot',filter==='unread' && value>0);
+  }
   $('#unread-badge').hidden = !counts.unread; $('#unread-badge').textContent = counts.unread;
 }
 async function refreshState() {
@@ -103,7 +108,7 @@ async function changeView(view) {
   state.view = view;
   $$('.view').forEach(item => item.hidden = item.id !== 'view-'+view);
   $$('[data-view]').forEach(item => item.classList.toggle('active',item.dataset.view === view));
-  $('#page-label').textContent = {notes:'笔记工作台',files:'设备文件',report:'笔记回顾',settings:'连接与设置'}[view];
+  $('#page-label').textContent = {notes:'笔记与解答',files:'设备文件',report:'笔记回顾',settings:'连接与设置'}[view];
   if (view === 'notes') await loadNotes(false);
   if (view === 'files') await loadFiles();
   if (view === 'report') await loadReport();
@@ -112,7 +117,6 @@ async function changeView(view) {
 function updateNoteMode() {
   const grouped=state.noteMode==='documents';
   $('#notes-workspace').classList.toggle('document-mode',grouped);
-  $('#document-browser').hidden=!grouped;
   $$('[data-note-mode]').forEach(button=>{const active=button.dataset.noteMode===state.noteMode;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));});
 }
 async function loadNotes(force=false) {
@@ -120,9 +124,50 @@ async function loadNotes(force=false) {
   if (state.noteMode==='documents') return await loadChannels(force);
   return await loadNoteList(force);
 }
-function renderChannels() {
-  $('#document-list').innerHTML=state.channels.length?state.channels.map(channel=>`<button class="note-item document-item ${state.channel?.id===channel.id?'selected':''}" data-channel="${esc(channel.id)}" title="${esc(channel.remote_path)}"><div class="note-item-head"><span class="document-icon">▱ PDF</span><time>${esc(fmt(channel.last_activity,true))}</time></div><div class="document-title"><h3>${esc(channel.title)}</h3>${channel.unread?`<span class="document-unread" aria-label="${Number(channel.unread)} 条未读回复">${Number(channel.unread)}</span>`:''}</div><p class="note-excerpt">${esc(channel.last_snippet || '选择文档，查看笔记')}</p><div class="note-origin">${Number(channel.notes)} 条笔记${state.filter==='ignored'?' · 已忽略':channel.needs_review?` · ${Number(channel.needs_review)} 条待确认`:''}</div></button>`).join(''):`<div class="empty">${state.filter==='ignored'?'没有已忽略的笔记。':state.filter==='unread'?'暂时没有新回复。':'还没有匹配的 PDF 笔记。'}</div>`;
-  $('#document-count').textContent=`${state.channels.length} 份 PDF · ${state.channels.reduce((sum,item)=>sum+Number(item.unread),0)} 条新回复`;
+const clock = value => { const date=new Date(value); return Number.isNaN(date.valueOf()) ? '' : date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}); };
+function dayLabel(note) {
+  if (!note.time_trusted) return '历史导入';
+  const date=new Date(note.device_modified);
+  if (Number.isNaN(date.valueOf())) return '日期不确定';
+  const today=new Date(), days=Math.round((new Date(today.getFullYear(),today.getMonth(),today.getDate())-new Date(date.getFullYear(),date.getMonth(),date.getDate()))/86400000);
+  return days===0?'今天':days===1?'昨天':date.toLocaleDateString('zh-CN',{year:date.getFullYear()===today.getFullYear()?undefined:'numeric',month:'long',day:'numeric'});
+}
+function noteRowHTML(note,timeline) {
+  const unread=note.unread && !note.ignored;
+  const time=note.time_trusted?(timeline?clock(note.device_modified):fmt(note.device_modified,true)):(timeline?'':'历史导入');
+  return `<button class="nav-note${state.selected===note.id?' selected':''}${unread?' unread':''}" data-note="${note.id}"><span class="nav-note-head"><span class="nav-note-title">${unread?'<span class="dot" aria-hidden="true"></span><span class="sr-only">新回复：</span>':''}${esc(note.title)}</span><time>${esc(time)}</time></span><span class="nav-note-excerpt">${esc(note.question || note.transcript || '尚未识别笔迹，可打开原图核对。')}</span><span class="nav-note-foot"><span class="nav-note-origin">P${Number(note.page)}${timeline?' · '+esc(note.document_title):''}</span>${badge(note)}</span></button>`;
+}
+function navHTML() {
+  if (state.noteMode!=='documents') {
+    let group=null;
+    return state.notes.length?state.notes.map(note=>{const day=dayLabel(note),head=day!==group?`<div class="nav-day">${esc(day)}</div>`:'';group=day;return head+noteRowHTML(note,true);}).join(''):'<div class="empty">这里没有符合条件的笔记。</div>';
+  }
+  const channels=state.channel && !state.channels.some(item=>item.id===state.channel.id)?[state.channel,...state.channels]:state.channels;
+  if (!channels.length) return `<div class="empty">${state.filter==='ignored'?'没有已忽略的笔记。':state.filter==='unread'?'暂时没有新回复。':'还没有匹配的 PDF 笔记。'}</div>`;
+  return channels.map(channel=>{
+    const selected=state.channel?.id===channel.id, open=selected && state.collapsedChannel!==channel.id;
+    const count=Number(channel.notes ?? (selected?state.notes.length:0)), unread=Number(channel.unread)||0;
+    const meta=[`${count} 条笔记`,state.filter==='ignored'?'已忽略':channel.needs_review?`${Number(channel.needs_review)} 条待确认`:'',channel.last_activity?fmt(channel.last_activity,true):''].filter(Boolean).join(' · ');
+    const children=state.notesFor!==channel.id?'<div class="nav-hint">正在读取…</div>':state.notes.length?state.notes.map(note=>noteRowHTML(note,false)).join(''):'<div class="nav-hint">这里没有符合条件的笔记。</div>';
+    return `<div class="nav-doc${open?' open':''}${selected?' selected':''}"><button class="nav-doc-row" data-channel="${esc(channel.id)}" title="${esc(channel.remote_path)}" aria-expanded="${open}"><span class="caret" aria-hidden="true">›</span><span class="nav-doc-text"><span class="nav-doc-title">${esc(channel.title)}</span><span class="nav-doc-meta">${esc(meta)}</span></span>${unread?`<span class="count-pill hot" aria-label="${unread} 条未读回复">${unread}</span>`:`<span class="count-pill" aria-label="${count} 条笔记">${count}</span>`}</button>${open?`<div class="nav-notes">${children}</div>`:''}</div>`;
+  }).join('');
+}
+function renderNav() {
+  const nav=$('#note-nav'), html=navHTML();
+  if (html!==state.navHTML) { const top=nav.scrollTop; nav.innerHTML=html; state.navHTML=html; nav.scrollTop=top; }
+  $('#nav-count').textContent=state.noteMode==='documents'?`${state.channels.length} 份 PDF · ${state.channels.reduce((sum,item)=>sum+Number(item.unread),0)} 条新回复`:`${state.notes.length} 条笔记`;
+  updatePager();
+}
+function updatePager() {
+  const index=state.notes.findIndex(note=>note.id===state.detail?.id), previous=$('#prev-note'), next=$('#next-note');
+  if (previous) previous.disabled=index<=0;
+  if (next) next.disabled=index<0 || index>=state.notes.length-1;
+}
+async function moveNote(step) {
+  const target=state.notes[state.notes.findIndex(note=>note.id===state.selected)+step];
+  if (!target || state.editing) return;
+  await openNote(target.id);
+  $(`#note-nav [data-note="${target.id}"]`)?.scrollIntoView?.({block:'nearest'});
 }
 async function loadChannels(force=false) {
   const request=++state.channelRequest;
@@ -134,20 +179,13 @@ async function loadChannels(force=false) {
   const keep=state.editing || (state.filter==='unread' && state.selected && state.detail?.document_id===previous);
   state.channel=current || (keep?state.channel:null) || channels[0] || null;
   if (previous!==state.channel?.id && !state.editing) {state.selected=null;state.detail=null;state.historyAnswer=null;}
-  renderChannels();
+  renderNav();
   if (state.channel) await loadNoteList(force);
   else if (!state.editing) {
-    state.notes=[];state.selected=null;state.detail=null;
-    renderNoteList();
+    state.notes=[];state.notesFor=null;state.selected=null;state.detail=null;
+    renderNav();
     $('#note-detail').innerHTML='<div class="empty"><strong>先选择一份 PDF</strong>左侧选择文档，再从笔记列表中打开一条笔记。</div>';
   }
-}
-function renderNoteList() {
-  const top=$('#note-list').scrollTop;
-  $('#note-list').innerHTML=state.notes.length?state.notes.map(note=>`<button class="note-item ${state.selected===note.id?'selected':''}" data-note="${note.id}"><div class="note-item-head"><span>${badge(note)}</span><time>${note.time_trusted?esc(fmt(note.device_modified,true)):'历史导入'}</time></div><h3>${esc(note.title)}</h3><p class="note-excerpt">${esc(note.question || note.transcript || '尚未识别笔迹，可打开原图核对。')}</p><div class="note-origin">${esc(note.document_title)} · P${note.page}</div></button>`).join(''):'<div class="empty">这里没有符合条件的笔记。</div>';
-  $('#note-list').scrollTop=top;
-  $('#note-count').textContent=`${state.notes.length} 条笔记 · 原始笔迹保留`;
-  $('#notes-heading').textContent=state.noteMode==='documents'?(state.channel?.title || '先选择 PDF'):'全部笔记';
 }
 function detailSignature(note) {
   if (!note) return '';
@@ -162,13 +200,13 @@ async function loadNoteList(force=false) {
   const path='/api/notes?status='+encodeURIComponent(state.filter)+'&q='+encodeURIComponent(search)+(documentId?'&document_id='+encodeURIComponent(documentId):'');
   const notes=await api(path);
   if (request!==state.searchRequest || state.noteMode!==mode || (documentId && state.channel?.id!==documentId)) return;
-  state.notes=notes;
+  state.notes=notes;state.notesFor=documentId;
   const current=notes.find(note=>note.id===state.selected);
   const keepRead=state.filter==='unread' && state.detail && state.detail.id===state.selected && (!documentId || state.detail.document_id===documentId);
   if (!current && !state.editing && !state.historyAnswer && !keepRead) {
     state.selected=notes[0]?.id || null;state.detail=null;
   }
-  renderNoteList();
+  renderNav();
   if (state.selected && !state.editing && !state.historyAnswer && (force || !state.detail || (current && detailSignature(current)!==detailSignature(state.detail)))) await openNote(state.selected,false);
   else if (!state.selected && !state.editing) $('#note-detail').innerHTML='<div class="empty"><strong>选择一条笔记</strong>在笔记列表中选择，查看原始笔迹、正文与解答。</div>';
   await markCurrentNoteRead();
@@ -177,23 +215,21 @@ async function openChannel(identifier) {
   const channel=state.channels.find(item=>item.id===identifier);
   if (!channel) return;
   ++state.detailRequest;
-  state.channel=channel;state.selected=null;state.detail=null;state.editing=false;state.historyAnswer=null;state.notes=[];
-  renderChannels();renderNoteList();
+  state.channel=channel;state.collapsedChannel=null;state.selected=null;state.detail=null;state.editing=false;state.historyAnswer=null;state.notes=[];state.notesFor=null;
+  renderNav();
   $('#note-detail').innerHTML='<div class="empty">正在读取这份 PDF 的笔记…</div>';
   await loadNoteList(true);
 }
 async function openNote(identifier,markRead=true) {
   const request=++state.detailRequest;
-  state.selected=Number(identifier);state.editing=false;state.historyAnswer=null;
+  state.selected=Number(identifier);state.editing=false;state.historyAnswer=null;state.collapsedChannel=null;
+  renderNav();
   const note=await api('/api/notes/'+state.selected);
   if (request!==state.detailRequest || note.id!==state.selected || state.editing) return;
   const differentDocument=state.noteMode==='documents' && state.channel?.id!==note.document_id;
-  if (state.noteMode==='documents') {
-    state.channel=state.channels.find(channel=>channel.id===note.document_id) || {...(state.channel?.id===note.document_id?state.channel:{}),id:note.document_id,title:note.document_title,remote_path:note.remote_path,unread:0};
-    renderChannels();
-  }
+  if (state.noteMode==='documents') state.channel=state.channels.find(channel=>channel.id===note.document_id) || {...(state.channel?.id===note.document_id?state.channel:{}),id:note.document_id,title:note.document_title,remote_path:note.remote_path,unread:0};
   state.detail=note;
-  renderDetail(note);renderNoteList();
+  renderDetail(note);renderNav();
   if (markRead) await markCurrentNoteRead();
   if (differentDocument) await loadNoteList(false);
 }
@@ -211,7 +247,9 @@ async function markCurrentNoteRead() {
     if (channel) channel.unread=Math.max(0,Number(channel.unread)-1);
     if (state.channel?.id===note.document_id && state.channel!==channel) state.channel.unread=Math.max(0,Number(state.channel.unread || 0)-1);
     if (state.app) {state.app.stats.unread=Math.max(0,state.app.stats.unread-1);renderStats(state.app.stats);}
-    renderChannels();renderNoteList();
+    const markButton=$('#note-detail [data-action="mark-read"]');
+    if (markButton && state.detail?.answer_id===answer) markButton.hidden=true;
+    renderNav();
   } finally {state.reading.delete(answer);}
 }
 async function setNoteIgnored(identifier,ignored) {
@@ -227,15 +265,18 @@ function renderDetail(note, historical = null) {
   const provenance = historical ? historical.provenance : note.answer_provenance;
   const source = historical ? historical.model : note.answer_model;
   const tags = (note.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
-  $('#note-detail').innerHTML = `<div class="detail-meta"><span>笔记 ${String(note.id).padStart(3,'0')} <span aria-hidden="true">/</span> ${esc(note.document_title)} · P${note.page}</span><span>${note.time_trusted ? esc(fmt(note.device_modified)):'历史批注 · 日期不确定'}</span></div><h2>${esc(note.title)}</h2><div class="detail-note-tools row wrap"><button class="button quiet small" data-ignore-note="${note.id}" data-ignored="${note.ignored?'false':'true'}">${note.ignored?'恢复笔记':'忽略这条笔记'}</button>${note.ignored?'<span class="helper">已忽略，暂停解读，可随时恢复。</span>':''}</div><div class="tag-row">${tags}${note.status==='needs_review' && !note.ignored?'<span class="badge review">请先核对转写</span>':''}</div>
-    <div class="note-source"><strong>你的原始笔迹</strong><a href="${esc(note.pdf_url)}" target="_blank" rel="noopener">打开 PDF 第 ${note.page} 页 ↗</a></div>
-    <div class="ink-frame">${note.preview_url?`<img src="${esc(note.preview_url)}?v=${esc(note.content_hash.slice(0,12))}" alt="第${note.page}页的原始笔迹和正文" loading="lazy">`:'<div class="empty">暂无笔迹截图</div>'}<div class="ink-caption"><span>保留正文上下文与手写标记</span><span>${note.manual_transcript?'转写已人工核对':note.confidence!=null?'识别置信度 '+Math.round(note.confidence*100)+'%':'等待识别'}</span></div></div>
-    <div id="transcript-area"><div class="transcript-block"><div><span class="transcript-label">手写转写 / 提出的问题</span><p>${esc(note.transcript || '尚未转写，可以手动填写，也可以使用视觉模型识别。')}</p>${note.question && note.question !== note.transcript?`<p class="muted">${esc(note.question)}</p>`:''}${note.anchor?`<p class="muted">标记：${esc(note.anchor)}</p>`:''}</div><button class="button quiet small" data-action="edit-note" ${note.ignored?'disabled':''}>${note.ignored?'恢复后可校正':note.status==='needs_review'?'核对转写':'校正文字'}</button></div></div>
+  const tools = answer && !note.ignored ? `<button class="button quiet small" data-action="analyze">重新解读</button>${note.unread?'<button class="button quiet small" data-action="mark-read">标为已读</button>':''}${note.history?.length>1?`<select id="answer-history" aria-label="解读历史"><option value="">当前解读</option>${note.history.map(item=>`<option value="${item.id}"${historical?.id===item.id?' selected':''}>${esc(fmt(item.created_at,true))} · ${esc(item.model)}</option>`).join('')}</select>`:''}` : '';
+  $('#note-detail').innerHTML = `<div class="detail-bar"><button class="button quiet small back-button" data-action="back-to-list">← 返回列表</button><div class="detail-crumb" title="${esc(note.remote_path || note.document_title)}"><span class="crumb-doc">${esc(note.document_title)}</span><span class="crumb-rest"><span class="crumb-sep" aria-hidden="true">›</span>P${note.page} · ${note.time_trusted ? esc(fmt(note.device_modified,true)):'历史批注 · 日期不确定'}</span></div><div class="detail-actions"><button id="prev-note" class="icon-button" data-action="prev-note" aria-label="上一条笔记" title="上一条（k）">‹</button><button id="next-note" class="icon-button" data-action="next-note" aria-label="下一条笔记" title="下一条（j）">›</button><a class="button quiet small" href="${esc(note.pdf_url)}" target="_blank" rel="noopener"><span class="label-long">打开 PDF 第 ${note.page} 页</span><span class="label-short">PDF</span> ↗</a><button class="button quiet small" data-ignore-note="${note.id}" data-ignored="${note.ignored?'false':'true'}">${note.ignored?'恢复笔记':'忽略这条笔记'}</button></div></div>
+    <div class="detail-body"><header class="detail-head"><h2>${esc(note.title)}</h2><div class="tag-row">${tags}${note.status==='needs_review' && !note.ignored?'<span class="badge review">待确认 · 请先核对转写</span>':badge(note)}</div>
+    ${note.ignored?'<div class="notice">已忽略，暂停解读，可随时恢复。</div>':''}
     ${note.error?`<div class="notice error-text">${esc(note.error)}</div>`:''}
     ${note.in_sync_scope === false?'<div class="notice">这份文档不在当前同步文件夹内，已保留归档内容。若需继续解读，请在设备文件中添加所属文件夹。</div>':''}
-    ${!note.time_trusted?'<p class="helper">这条批注的设备时间异常，只作为历史笔记归档，不计入近期统计。</p>':''}
-    ${answer ? answerHTML(answer, provenance, source, note.status !== 'answered' || !!historical) : note.ignored?'<div class="empty">这条笔记已忽略，原始笔迹仍在归档中。</div>': `<div class="empty"><strong>${note.status==='needs_review'?'先确认你写了什么':'这条疑问，还可以再往前一步'}</strong>${note.status==='needs_review'?'点“核对转写”，确认文字后再解读。':'配置好模型后，可以直接从笔迹得到解释和解答。'}<br><button class="button primary" data-action="analyze">${note.status==='needs_review'?'重新识别':'识别并解读'}</button></div>`}
-    ${answer && !note.ignored?`<div class="answer-actions"><button class="button quiet small" data-action="analyze">重新解读</button><button class="button quiet small" data-action="mark-read">标为已读</button>${note.history?.length>1?`<select id="answer-history" aria-label="解读历史"><option value="">当前解读</option>${note.history.map(item=>`<option value="${item.id}">${esc(fmt(item.created_at,true))} · ${esc(item.model)}</option>`).join('')}</select>`:''}</div>`:''}`;
+    ${!note.time_trusted?'<p class="helper">这条批注的设备时间异常，只作为历史笔记归档，不计入近期统计。</p>':''}</header>
+    <div class="detail-panels"><section class="ink-panel" aria-label="原始笔迹"><div class="panel-title"><strong>原始笔迹</strong><span>${note.manual_transcript?'转写已人工核对':note.confidence!=null?'识别置信度 '+Math.round(note.confidence*100)+'%':'等待识别'}</span></div>
+    <div class="ink-frame">${note.preview_url?`<img src="${esc(note.preview_url)}?v=${esc(note.content_hash.slice(0,12))}" alt="第${note.page}页的原始笔迹和正文" loading="lazy" data-action="zoom-ink" title="点击放大">`:'<div class="empty">暂无笔迹截图</div>'}</div>
+    <div id="transcript-area"><div class="transcript-card"><div class="transcript-head"><span class="transcript-label">手写转写 / 提出的问题</span><button class="button quiet small" data-action="edit-note" ${note.ignored?'disabled':''}>${note.ignored?'恢复后可校正':note.status==='needs_review'?'核对转写':'校正文字'}</button></div><p>${esc(note.transcript || '尚未转写，可以手动填写，也可以使用视觉模型识别。')}</p>${note.question && note.question !== note.transcript?`<p class="muted">${esc(note.question)}</p>`:''}${note.anchor?`<p class="muted">标记：${esc(note.anchor)}</p>`:''}</div></div></section>
+    <section class="answer-panel" aria-label="解答">${answer ? answerHTML(answer, provenance, source, note.status !== 'answered' || !!historical, tools) : note.ignored?'<div class="empty">这条笔记已忽略，原始笔迹仍在归档中。</div>': `<div class="empty"><strong>${note.status==='needs_review'?'先确认你写了什么':'这条疑问，还可以再往前一步'}</strong>${note.status==='needs_review'?'点“核对转写”，确认文字后再解读。':'配置好模型后，可以直接从笔迹得到解释和解答。'}<br><button class="button primary" data-action="analyze">${note.status==='needs_review'?'重新识别':'识别并解读'}</button></div>`}</section></div></div>`;
+  updatePager();
 }
 function sourceHTML(value) {
   const text = String(value); const match = text.match(/https:\/\/[^\s<>]+/);
@@ -254,14 +295,14 @@ function exerciseReviewsHTML(reviews) {
     return `<article class="exercise-review" data-verdict="${verdict}"><div class="row wrap"><strong>${esc(item.question_ref || '当前题目')}</strong><span class="badge ${verdict==='incorrect'?'error':verdict==='uncertain'?'review':''}">${label}</span></div>${item.question?`<p class="answer-body">${esc(item.question)}</p>`:''}<p>你的作答：${esc(item.user_answer || '待确认')}</p><p>建议答案：${esc(item.suggested_answer || '待补充')}</p><p class="helper">${basis}</p>${item.reference_quote?`<blockquote>${esc(item.reference_quote)}</blockquote>`:''}<div class="answer-body">${esc(item.explanation)}</div>${points.length?'<h4>需要掌握的知识点</h4><ul>'+points.map(point=>`<li>${esc(point)}</li>`).join('')+'</ul>':''}</article>`;
   }).join('');
 }
-function answerHTML(answer, provenance, source, previous) {
+function answerHTML(answer, provenance, source, previous, tools = '') {
   const examples = Array.isArray(answer.examples) ? answer.examples.filter(v=>v && typeof v==='object') : [];
   const sources = Array.isArray(answer.sources) ? answer.sources : [];
   const uncertainties = Array.isArray(answer.uncertainties) ? answer.uncertainties : [];
-  return `${previous?'<div class="notice">正在查看先前的解答。笔记修改后，请重新解读以匹配最新内容。</div>':''}<div class="answer-header"><span class="answer-mark">解</span><h3>把这一点弄明白</h3><span class="muted">${esc(provenance==='verified_import'?'核对资料后导入':source || '模型解读')}</span></div><p class="answer-summary">${esc(answer.summary)}</p><div class="answer-body">${esc(answer.explanation)}</div>
+  return `<div class="answer-header"><span class="answer-mark">解</span><h3>把这一点弄明白</h3><span class="muted answer-source">${esc(provenance==='verified_import'?'核对资料后导入':source || '模型解读')}</span>${tools?`<div class="answer-tools">${tools}</div>`:''}</div><div class="answer-content">${previous?'<div class="notice">正在查看先前的解答。笔记修改后，请重新解读以匹配最新内容。</div>':''}<p class="answer-summary">${esc(answer.summary)}</p><div class="answer-body">${esc(answer.explanation)}</div>
     ${exerciseReviewsHTML(answer.exercise_reviews)}
     ${examples.length?'<h3>补充示例</h3>'+examples.map(item=>`<div class="example"><p class="example-text">${esc(item.text ?? item.ja)}</p><p class="example-explanation">${esc(item.explanation ?? item.zh)}</p></div>`).join(''):''}
-    <div class="answer-foot">${uncertainties.map(item=>`<p>${esc(item)}</p>`).join('')}${sources.length?'<p>参考与上下文</p>'+sources.map(item=>`<p>· ${sourceHTML(item)}</p>`).join(''):''}${provenance!=='verified_import'?'<p>模型解读依据提供的上下文生成，关键内容请结合原文核对。</p>':''}</div>`;
+    <div class="answer-foot">${uncertainties.map(item=>`<p>${esc(item)}</p>`).join('')}${sources.length?'<p>参考与上下文</p>'+sources.map(item=>`<p>· ${sourceHTML(item)}</p>`).join(''):''}${provenance!=='verified_import'?'<p>模型解读依据提供的上下文生成，关键内容请结合原文核对。</p>':''}</div></div>`;
 }
 function editNote() {
   const note = state.detail; if (!note) return;
@@ -304,7 +345,8 @@ function renderFiles() {
   const search = $('#file-search').value.toLowerCase();
   const files = state.files.filter(file => (!$('#tracked-only').checked || file.tracked) && (file.name+file.remote_path).toLowerCase().includes(search));
   $('#file-count').textContent = `${files.length} / ${state.files.length} 份 PDF`;
-  $('#file-list').innerHTML = files.length ? files.map(file => `<tr><td><input type="checkbox" data-file-select="${file.id}" ${state.fileSelection.has(file.id)?'checked':''} ${file.device_present===0?'disabled':''} aria-label="选择 ${esc(file.name)}"></td><td><strong>${esc(file.name)}</strong><small>${esc(file.remote_path)}</small></td><td>${file.pages || '—'} 页 / ${file.notes} 条</td><td class="muted">${esc(fmt(file.device_modified,true))}</td><td><span class="badge ${file.tracked?'':'pending'}">${file.device_present===0?'设备中已移除':file.tracked?'已包含':'范围外'}</span></td><td><div class="row">${file.tracked?`<button class="button quiet small" data-pull="${file.id}">拉取</button>`:''}${file.snapshot_id || file.has_baseline?`<a class="button quiet small" href="/media/document/${file.id}" target="_blank" rel="noopener">打开</a>`:''}</div></td></tr>`).join('') : '<tr><td colspan="6"><div class="empty">没有匹配的文件。选择同步文件夹并刷新设备目录后，文件会显示在这里。</div></td></tr>';
+  $('#file-list').innerHTML = files.length ? files.map(file => `<tr><td><input type="checkbox" data-file-select="${file.id}" ${state.fileSelection.has(file.id)?'checked':''} ${file.device_present===0?'disabled':''} aria-label="选择 ${esc(file.name)}"></td><td><strong>${esc(file.name)}</strong><small>${esc(file.remote_path)}</small><small class="compact-meta">${file.pages || '—'} 页 · ${file.notes} 条笔记</small></td><td class="col-optional">${file.pages || '—'} 页 / ${file.notes} 条</td><td class="col-optional muted">${esc(fmt(file.device_modified,true))}</td><td><span class="badge ${file.tracked?'':'pending'}">${file.device_present===0?'设备中已移除':file.tracked?'已包含':'范围外'}</span></td><td><div class="row">${file.tracked?`<button class="button quiet small" data-pull="${file.id}">拉取</button>`:''}${file.snapshot_id || file.has_baseline?`<a class="button quiet small" href="/media/document/${file.id}" target="_blank" rel="noopener">打开</a>`:''}</div></td></tr>`).join('') : '<tr><td colspan="6"><div class="empty">没有匹配的文件。选择同步文件夹并刷新设备目录后，文件会显示在这里。</div></td></tr>';
+  $('#bulk-bar').hidden = !state.fileSelection.size;
   $('#move-selection-count').textContent = `已选择 ${state.fileSelection.size} 份文档`;
   $('#move-files-button').disabled = !state.fileSelection.size;
   const movable = files.filter(file=>file.device_present!==0);
@@ -323,19 +365,25 @@ document.addEventListener('click', async event => {
     if (button.dataset.noteMode) {
       state.noteMode=button.dataset.noteMode;state.editing=false;state.selected=null;state.detail=null;state.historyAnswer=null;++state.detailRequest;
       try {window.localStorage?.setItem('dpt-note-mode',state.noteMode);} catch (_) { /* Browser storage is optional. */ }
+      $('#note-nav').scrollTop=0;
       return await loadNotes(true);
     }
-    if (button.dataset.filter) { state.filter = button.dataset.filter;state.channel=null;state.editing=false;state.selected=null;state.detail=null;state.historyAnswer=null;++state.detailRequest; $$('.filter').forEach(item=>item.classList.toggle('active',item===button)); return await loadNotes(true); }
-    if (button.dataset.channel) return await openChannel(button.dataset.channel);
+    if (button.dataset.filter) { state.filter = button.dataset.filter;state.channel=null;state.editing=false;state.selected=null;state.detail=null;state.historyAnswer=null;++state.detailRequest; $$('.filter').forEach(item=>item.classList.toggle('active',item===button)); $('#note-nav').scrollTop=0; return await loadNotes(true); }
+    if (button.dataset.channel) {
+      const identifier=button.dataset.channel;
+      if (state.channel?.id===identifier && state.notesFor===identifier) { state.collapsedChannel=state.collapsedChannel===identifier?null:identifier; return renderNav(); }
+      return await openChannel(identifier);
+    }
     if (button.dataset.openNote) return await openNote(button.dataset.openNote);
     if (button.dataset.ignoreNote) return await setNoteIgnored(Number(button.dataset.ignoreNote),button.dataset.ignored==='true');
-    if (button.dataset.note) return await openNote(button.dataset.note);
+    if (button.dataset.note) { $('#notes-workspace').classList.add('show-detail'); return await openNote(button.dataset.note); }
     if (button.dataset.gotoNote) {
       const note=await api('/api/notes/'+Number(button.dataset.gotoNote));
-      state.filter=note.ignored?'ignored':'all';state.selected=note.id;state.detail=null;state.editing=false;state.historyAnswer=null;++state.detailRequest;
+      state.filter=note.ignored?'ignored':'all';state.selected=note.id;state.detail=null;state.editing=false;state.historyAnswer=null;state.collapsedChannel=null;++state.detailRequest;
       state.channel=state.channels.find(channel=>channel.id===note.document_id) || {id:note.document_id,title:note.document_title,remote_path:note.remote_path,unread:0};
       $('#note-search').value='';
       $$('.filter').forEach(item=>item.classList.toggle('active',item.dataset.filter===state.filter));
+      $('#notes-workspace').classList.add('show-detail');
       return await changeView('notes');
     }
     if (button.dataset.pull) return await job(`/api/documents/${button.dataset.pull}/pull`);
@@ -377,6 +425,11 @@ document.addEventListener('click', async event => {
         if (!state.app?.settings.model_ready) { toast('请先填写模型服务地址和名称'); return await changeView('settings'); }
         return await job(`/api/notes/${state.selected}/analyze`);
       case 'mark-read': await api(`/api/notes/${state.selected}/read`,{answer_id:state.detail.answer_id}); toast('已标为已读'); return await refreshState();
+      case 'back-to-list': $('#notes-workspace').classList.remove('show-detail'); return $(`#note-nav [data-note="${state.selected}"]`)?.scrollIntoView?.({block:'nearest'});
+      case 'prev-note': return await moveNote(-1);
+      case 'next-note': return await moveNote(1);
+      case 'zoom-ink': $('#ink-zoom img').src=button.currentSrc || button.src; $('#ink-zoom').hidden=false; return;
+      case 'close-zoom': $('#ink-zoom').hidden=true; return;
       case 'print': return window.print();
       case 'logout': await api('/api/logout',{}); return window.location.assign('/');
     }
@@ -421,6 +474,14 @@ document.addEventListener('change', async event => {
 });
 let searchTimer;
 $('#note-search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{state.channel=null;state.selected=null;state.detail=null;state.editing=false;state.historyAnswer=null;++state.detailRequest;loadNotes(true).catch(error=>toast(error.message,true));},220);});
+document.addEventListener('keydown',event=>{
+  if (!$('#ink-zoom').hidden) { if (event.key==='Escape') $('#ink-zoom').hidden=true; return; }
+  const target=event.target;
+  if (state.view!=='notes' || state.editing || event.metaKey || event.ctrlKey || event.altKey || ['INPUT','TEXTAREA','SELECT'].includes(target?.tagName) || target?.isContentEditable) return;
+  if (event.key==='/') { event.preventDefault(); return $('#note-search').focus(); }
+  const step={j:1,k:-1}[event.key];
+  if (step) { event.preventDefault(); moveNote(step).catch(error=>toast(error.message,true)); }
+});
 document.addEventListener('visibilitychange',()=>markCurrentNoteRead().catch(error=>toast(error.message,true)));
 $('#file-search').addEventListener('input',renderFiles);
 (async function poll(){await refreshState();setTimeout(poll,document.hidden?20000:4000);})();

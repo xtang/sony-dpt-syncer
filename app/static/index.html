@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f4ef">
   <title>墨记 · 文档与笔记助手</title>
   <link rel="stylesheet" href="/styles.css">
@@ -12,61 +12,66 @@
   <aside class="sidebar">
     <a class="brand" href="/" aria-label="墨记首页"><span class="brand-mark">墨</span><span>墨记<small>DOCUMENT NOTES</small></span></a>
     <div class="nav-label">我的文档空间</div>
-    <nav aria-label="主要导航">
-      <button class="nav-item active" data-view="notes"><span class="nav-icon">▤</span>笔记与解答<span id="unread-badge" class="nav-badge" hidden></span></button>
-      <button class="nav-item" data-view="files"><span class="nav-icon">▱</span>设备文件</button>
-      <button class="nav-item" data-view="report"><span class="nav-icon">◷</span>笔记回顾</button>
-      <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>连接与设置</button>
+    <nav class="nav" aria-label="主要导航">
+      <button class="nav-item active" data-view="notes" title="笔记与解答"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-text">笔记与解答</span><span class="nav-short">笔记</span><span id="unread-badge" class="nav-badge" hidden></span></button>
+      <button class="nav-item" data-view="files" title="设备文件"><span class="nav-icon" aria-hidden="true">▱</span><span class="nav-text">设备文件</span><span class="nav-short">文件</span></button>
+      <button class="nav-item" data-view="report" title="笔记回顾"><span class="nav-icon" aria-hidden="true">◷</span><span class="nav-text">笔记回顾</span><span class="nav-short">回顾</span></button>
+      <button class="nav-item" data-view="settings" title="连接与设置"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-text">连接与设置</span><span class="nav-short">设置</span></button>
     </nav>
     <div class="sidebar-note"><span>阅读、记录、理解。</span><p>疑问留在纸上，<br>理解留在这里。</p></div>
     <div class="device-card"><div class="device-outline"></div><div><strong>Sony Digital Paper</strong><span id="device-state">读取连接状态…</span></div><button class="text-button" data-action="probe" aria-label="检查设备连接">↻</button></div>
     <div class="sidebar-foot">笔记归档在你的服务器<br><button id="logout-button" class="button quiet small" data-action="logout" hidden>退出登录</button></div>
   </aside>
   <main>
-    <header class="topbar"><div><span class="workspace-label">文档与笔记</span><span class="topbar-divider">/</span><span id="page-label">笔记工作台</span></div><div class="topbar-actions"><span id="last-sync" class="muted">尚未同步</span><button class="button primary" data-action="sync"><span>↻</span> 同步并解读</button></div></header>
+    <header class="topbar"><h1 id="page-label">笔记与解答</h1><div class="topbar-actions"><span id="last-sync" class="muted">尚未同步</span><button class="button primary" data-action="sync"><span aria-hidden="true">↻</span> 同步并解读</button></div></header>
     <div id="connection-error" class="connection-error" hidden>暂时无法连接服务。请确认服务器已开机，且当前网络可以访问服务器。<button data-action="refresh">重试</button></div>
-    <section id="view-notes" class="view">
-      <div class="page-heading"><div><p class="eyebrow">YOUR NOTES, CONNECTED</p><h1>笔记与解答</h1><p class="subtitle">把设备上留下的疑问，一点点弄明白。</p></div><a class="button quiet" href="/api/export.md" download>↓ 导出笔记</a></div>
-      <div class="stats-row" id="stats"></div>
+    <section id="view-notes" class="view view-notes">
       <div class="notes-workspace document-mode" id="notes-workspace">
-        <section class="document-browser" id="document-browser" aria-label="PDF 文档列表">
-          <div class="panel-heading"><span class="panel-label">01 / PDF</span><h2>文档</h2></div>
-          <div id="document-list" class="document-list"><div class="empty">正在读取文档…</div></div>
-          <div id="document-count" class="list-foot"></div>
-        </section>
-        <section class="note-browser" aria-label="笔记列表">
-          <div class="list-toolbar"><div class="note-modes" role="group" aria-label="笔记组织方式"><button class="active" data-note-mode="documents" aria-pressed="true">按 PDF</button><button data-note-mode="timeline" aria-pressed="false">按时间</button></div><div class="notes-heading"><span class="panel-label">02 / 笔记</span><h2 id="notes-heading">先选择 PDF</h2></div><label class="search-box"><span>⌕</span><input id="note-search" type="search" placeholder="搜索文档、笔记、解答" aria-label="搜索文档与笔记"></label><div class="filter-row"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="unread">新回复</button><button class="filter" data-filter="pending">待解读</button><button class="filter" data-filter="needs_review">待确认</button><button class="filter" data-filter="ignored">已忽略</button></div></div>
-          <div id="note-list" class="note-list"><div class="empty">正在打开笔记…</div></div>
-          <div class="list-foot" id="note-count"></div>
-        </section>
+        <div class="notes-toolbar">
+          <label class="search-box"><span aria-hidden="true">⌕</span><input id="note-search" type="search" placeholder="搜索文档、笔记、解答" aria-label="搜索文档与笔记"></label>
+          <div class="filter-row" role="group" aria-label="筛选笔记"><button class="filter active" data-filter="all">全部<span id="count-all" class="filter-count"></span></button><button class="filter" data-filter="unread">新回复<span id="count-unread" class="filter-count"></span></button><button class="filter" data-filter="pending">待解读<span id="count-pending" class="filter-count"></span></button><button class="filter" data-filter="needs_review">待确认<span id="count-needs_review" class="filter-count"></span></button><button class="filter" data-filter="ignored">已忽略<span id="count-ignored" class="filter-count"></span></button></div>
+          <div class="note-modes" role="group" aria-label="笔记组织方式"><button class="active" data-note-mode="documents" aria-pressed="true">按 PDF</button><button data-note-mode="timeline" aria-pressed="false">按时间</button></div>
+          <a class="button quiet small export-link" href="/api/export.md" download>↓ 导出</a>
+        </div>
+        <nav class="note-nav-pane" aria-label="PDF 与笔记">
+          <div id="note-nav" class="note-nav"><div class="empty">正在读取文档…</div></div>
+          <div id="nav-count" class="list-foot"></div>
+        </nav>
         <article id="note-detail" class="note-detail" aria-live="polite"><div class="empty">选择一条笔记，查看笔迹和解答。</div></article>
       </div>
     </section>
     <section id="view-files" class="view" hidden>
-      <div class="page-heading"><div><p class="eyebrow">DIGITAL PAPER LIBRARY</p><h1>设备文件</h1><p class="subtitle">管理同步范围，保留你的每一笔批注。</p></div><label class="button primary upload-label">＋ 发送 PDF 到设备<input id="pdf-upload" type="file" accept="application/pdf,.pdf" hidden></label></div>
-      <section class="surface folder-card"><div class="folder-heading"><div><h2>同步文件夹</h2><p class="helper">只拉取并解读所选目录及其子目录中的批注。新放入的 PDF 也会自动加入。</p></div><button class="button quiet" data-action="refresh-folders">↻ 刷新设备目录</button></div><div id="folder-list" class="folder-list"></div><div class="row folder-add"><input id="folder-path" list="folder-options" placeholder="例如 Document/工作资料" aria-label="添加同步文件夹路径"><datalist id="folder-options"></datalist><button class="button quiet small" data-action="add-folder">添加路径</button></div><div class="row wrap"><button class="button primary" data-action="save-scope">保存同步范围</button><button class="button quiet" data-action="clear-scope">清空选择</button><span id="folder-summary" class="muted"></span></div></section>
-      <section class="surface organize-card"><h2>整理设备文件</h2><div class="row wrap"><input id="new-folder-path" placeholder="新文件夹，例如 Document/资料归档" aria-label="新文件夹路径"><button class="button quiet" data-action="create-folder">新建文件夹</button></div><div class="row wrap move-controls"><span id="move-selection-count" class="muted">已选择 0 份文档</span><input id="move-target" list="folder-options" placeholder="移动到，例如 Document/资料归档" aria-label="移动目标目录"><button id="move-files-button" class="button primary" data-action="move-files" disabled>移动所选文件</button><button class="button quiet small" data-action="clear-file-selection">取消选择</button></div><p class="helper">勾选下方文件后移动，可批量整理。目标文件夹不存在时会创建；同名文件不覆盖。移动前备份，移动后校验 PDF 内容；耗时取决于文件大小。整理后请把目标文件夹加入同步范围。</p></section>
-      <div class="surface file-controls"><label class="search-box"><span>⌕</span><input id="file-search" type="search" placeholder="搜索文件名或目录" aria-label="搜索文件"></label><label class="check-label"><input id="tracked-only" type="checkbox" checked>只看同步文件夹内的文件</label><span id="file-count" class="muted"></span></div>
-      <p class="helper">所选文件夹及其子文件夹中的 PDF 会自动加入同步。范围外的历史笔记和本地副本仍会保留，上传遇到同名文件会另存。</p>
-      <div class="surface table-wrap"><table><thead><tr><th><input id="select-visible-files" type="checkbox" aria-label="选择当前列表中的全部文件"></th><th>文件</th><th>页数 / 笔记</th><th>设备修改时间</th><th>同步范围</th><th>操作</th></tr></thead><tbody id="file-list"></tbody></table></div>
+      <div class="view-bar"><p class="subtitle">管理同步范围，保留你的每一笔批注。</p><label class="button primary small upload-label">＋ 发送 PDF 到设备<input id="pdf-upload" type="file" accept="application/pdf,.pdf" hidden></label></div>
+      <div class="view-body files-layout">
+        <section class="surface folder-card"><div class="folder-heading"><div><h2>同步文件夹</h2><p class="helper">只拉取并解读所选目录及其子目录中的批注，新放入的 PDF 也会自动加入。</p></div><button class="button quiet small" data-action="refresh-folders">↻ 刷新设备目录</button></div><div id="folder-list" class="folder-list"></div><div class="row folder-add"><input id="folder-path" list="folder-options" placeholder="例如 Document/工作资料" aria-label="添加同步文件夹路径"><datalist id="folder-options"></datalist><button class="button quiet small" data-action="add-folder">添加路径</button></div><div class="row wrap"><button class="button primary small" data-action="save-scope">保存同步范围</button><button class="button quiet small" data-action="clear-scope">清空选择</button><span id="folder-summary" class="muted"></span></div></section>
+        <section class="surface files-main">
+          <div class="file-toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="file-search" type="search" placeholder="搜索文件名或目录" aria-label="搜索文件"></label><label class="check-label"><input id="tracked-only" type="checkbox" checked>只看同步范围内</label><span id="file-count" class="muted"></span><div class="row new-folder"><input id="new-folder-path" placeholder="新文件夹，例如 Document/资料归档" aria-label="新文件夹路径"><button class="button quiet small" data-action="create-folder">新建文件夹</button></div></div>
+          <div id="bulk-bar" class="bulk-bar" hidden><div class="row wrap"><strong id="move-selection-count">已选择 0 份文档</strong><input id="move-target" list="folder-options" placeholder="移动到，例如 Document/资料归档" aria-label="移动目标目录"><button id="move-files-button" class="button primary small" data-action="move-files" disabled>移动所选文件</button><button class="button quiet small" data-action="clear-file-selection">取消选择</button></div><p class="helper">目标文件夹不存在时会创建，同名文件不覆盖；移动前备份、移动后校验。整理后请把目标文件夹加入同步范围。</p></div>
+          <div class="table-wrap"><table><thead><tr><th><input id="select-visible-files" type="checkbox" aria-label="选择当前列表中的全部文件"></th><th>文件</th><th class="col-optional">页数 / 笔记</th><th class="col-optional">设备修改时间</th><th>同步范围</th><th>操作</th></tr></thead><tbody id="file-list"></tbody></table></div>
+          <p class="helper files-foot">所选文件夹及其子文件夹中的 PDF 会自动加入同步；范围外的历史笔记和本地副本仍会保留，上传遇到同名文件会另存。</p>
+        </section>
+      </div>
     </section>
     <section id="view-report" class="view" hidden>
-      <div class="page-heading"><div><p class="eyebrow">REFLECT &amp; REVISIT</p><h1>笔记回顾</h1><p class="subtitle">回顾记录过的主题与尚待解答的问题。</p></div><div class="row"><select id="report-days" aria-label="回顾时间范围"><option value="1">最近 24 小时</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option></select><button class="button quiet" data-action="print">打印 / 存为 PDF</button></div></div>
-      <div id="report-content"></div>
+      <div class="view-bar"><p class="subtitle">回顾记录过的主题与尚待解答的问题。</p><div class="row"><select id="report-days" aria-label="回顾时间范围"><option value="1">最近 24 小时</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option></select><button class="button quiet small" data-action="print">打印 / 存为 PDF</button></div></div>
+      <div id="report-content" class="view-body"></div>
     </section>
     <section id="view-settings" class="view" hidden>
-      <div class="page-heading"><div><p class="eyebrow">A QUIET CONNECTION</p><h1>连接与设置</h1><p class="subtitle">连接你的设备和模型，之后只需要专心阅读。</p></div></div>
-      <form id="settings-form" class="settings-grid">
-        <section class="surface settings-card"><span class="section-number">01 / DEVICE</span><h2>Digital Paper</h2><label>DPT 的 IP 地址<input name="device_address" required placeholder="阅读器 IP 地址或主机名"></label><label>发送 PDF 的目录<input name="upload_folder" placeholder="Document/收件箱"></label><label class="check-label"><input name="sync_clock" type="checkbox">连接时校对设备时间</label><div class="row"><button class="button quiet" type="button" data-action="probe">检查连接</button><button class="button quiet" type="button" data-action="pair">重新配对</button><span id="paired-label" class="muted"></span></div><div id="pin-box" class="pin-box" hidden><p>请查看 DPT 屏幕上显示的配对码。</p><div class="row"><input id="pair-pin" inputmode="numeric" autocomplete="off" placeholder="输入配对码" aria-label="配对码"><button class="button primary" type="button" data-action="pin">完成配对</button></div></div></section>
-        <section class="surface settings-card"><span class="section-number">02 / MODEL</span><h2>识别与解答</h2><p class="helper">使用支持图片输入的 OpenAI 兼容接口。解读时会向该服务发送笔迹截图、所在页的文字和相关笔记。</p><label>API Base URL<input name="model_base_url" type="url" placeholder="https://你的服务地址/v1" autocomplete="off"></label><label>模型名称<input name="model_name" placeholder="填写服务提供的视觉模型名称" autocomplete="off"></label><label>API Key<input name="model_api_key" type="password" placeholder="可选；留空保留已保存的密钥" autocomplete="off"></label><label class="check-label"><input name="clear_api_key" type="checkbox">清除已保存的密钥</label><div class="row"><button class="button quiet" type="button" data-action="model-test">保存并测试接口</button><span id="key-state" class="muted"></span></div></section>
-        <section class="surface settings-card"><span class="section-number">03 / WORKFLOW</span><h2>让笔记自然接续</h2><label class="check-label"><input name="auto_sync" type="checkbox">设备在线时自动检查笔记变动</label><label>检查间隔<select name="sync_interval"><option value="60">每 1 分钟</option><option value="180">每 3 分钟</option><option value="300">每 5 分钟</option><option value="600">每 10 分钟</option></select></label><label class="check-label"><input name="auto_analyze" type="checkbox">同步后自动识别并解读新笔记</label><p class="helper">设备休眠时会等待下次检查。识别不确定的笔迹会留在“待确认”，等待你核对后再继续解读。关闭自动解读时，你可以逐条选择解读。</p></section>
-        <section class="surface settings-card"><span class="section-number">04 / YOUR DATA</span><h2>笔记由你保管</h2><p class="helper">同步、批注提取、去重、归档、搜索和统计由服务器程序完成。手写识别、意图理解和问题解答使用模型。没有配置模型时，仍可同步、查看和导出笔记。</p><div class="row wrap"><a class="button quiet" href="/api/export.json" download>导出 JSON</a><a class="button quiet" href="/api/export.md" download>导出 Markdown</a><a class="button quiet" href="/api/backup.sqlite3" download>备份数据库</a></div><p class="helper">数据库备份包含文字与解答；完整备份还需要服务器上的 PDF 和笔迹截图。密钥单独保存在服务器私有设置文件。</p></section>
-        <div class="settings-footer"><button class="button primary" type="submit">保存设置</button><span id="settings-feedback" class="muted" role="status"></span><button class="button quiet" type="button" data-action="logout" hidden>退出登录</button></div>
-      </form>
-      <section class="surface activity-card"><h2>最近活动</h2><div id="activity-list"></div></section>
+      <div class="view-bar"><p class="subtitle">连接你的设备和模型，之后只需要专心阅读。</p></div>
+      <div class="view-body">
+        <form id="settings-form" class="settings-grid">
+          <section class="surface settings-card"><span class="section-number">01 / DEVICE</span><h2>Digital Paper</h2><label>DPT 的 IP 地址<input name="device_address" required placeholder="阅读器 IP 地址或主机名"></label><label>发送 PDF 的目录<input name="upload_folder" placeholder="Document/收件箱"></label><label class="check-label"><input name="sync_clock" type="checkbox">连接时校对设备时间</label><div class="row wrap"><button class="button quiet" type="button" data-action="probe">检查连接</button><button class="button quiet" type="button" data-action="pair">重新配对</button><span id="paired-label" class="muted"></span></div><div id="pin-box" class="pin-box" hidden><p>请查看 DPT 屏幕上显示的配对码。</p><div class="row"><input id="pair-pin" inputmode="numeric" autocomplete="off" placeholder="输入配对码" aria-label="配对码"><button class="button primary" type="button" data-action="pin">完成配对</button></div></div></section>
+          <section class="surface settings-card"><span class="section-number">02 / MODEL</span><h2>识别与解答</h2><p class="helper">使用支持图片输入的 OpenAI 兼容接口。解读时会向该服务发送笔迹截图、所在页的文字和相关笔记。</p><label>API Base URL<input name="model_base_url" type="url" placeholder="https://你的服务地址/v1" autocomplete="off"></label><label>模型名称<input name="model_name" placeholder="填写服务提供的视觉模型名称" autocomplete="off"></label><label>API Key<input name="model_api_key" type="password" placeholder="可选；留空保留已保存的密钥" autocomplete="off"></label><label class="check-label"><input name="clear_api_key" type="checkbox">清除已保存的密钥</label><div class="row wrap"><button class="button quiet" type="button" data-action="model-test">保存并测试接口</button><span id="key-state" class="muted"></span></div></section>
+          <section class="surface settings-card"><span class="section-number">03 / WORKFLOW</span><h2>让笔记自然接续</h2><label class="check-label"><input name="auto_sync" type="checkbox">设备在线时自动检查笔记变动</label><label>检查间隔<select name="sync_interval"><option value="60">每 1 分钟</option><option value="180">每 3 分钟</option><option value="300">每 5 分钟</option><option value="600">每 10 分钟</option></select></label><label class="check-label"><input name="auto_analyze" type="checkbox">同步后自动识别并解读新笔记</label><p class="helper">设备休眠时会等待下次检查。识别不确定的笔迹会留在“待确认”，等待你核对后再继续解读。关闭自动解读时，你可以逐条选择解读。</p></section>
+          <section class="surface settings-card"><span class="section-number">04 / YOUR DATA</span><h2>笔记由你保管</h2><p class="helper">同步、批注提取、去重、归档、搜索和统计由服务器程序完成。手写识别、意图理解和问题解答使用模型。没有配置模型时，仍可同步、查看和导出笔记。</p><div class="row wrap"><a class="button quiet" href="/api/export.json" download>导出 JSON</a><a class="button quiet" href="/api/export.md" download>导出 Markdown</a><a class="button quiet" href="/api/backup.sqlite3" download>备份数据库</a></div><p class="helper">数据库备份包含文字与解答；完整备份还需要服务器上的 PDF 和笔迹截图。密钥单独保存在服务器私有设置文件。</p></section>
+          <div class="settings-footer"><button class="button primary" type="submit">保存设置</button><span id="settings-feedback" class="muted" role="status"></span><button class="button quiet" type="button" data-action="logout" hidden>退出登录</button></div>
+        </form>
+        <section class="surface activity-card"><h2>最近活动</h2><div id="activity-list"></div></section>
+      </div>
     </section>
     <div id="job-strip" class="job-strip" hidden role="status"></div>
   </main>
+  <div id="ink-zoom" class="ink-zoom" data-action="close-zoom" hidden><img alt="原始笔迹放大"></div>
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
 </body>
 </html>
