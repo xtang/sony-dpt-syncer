@@ -84,6 +84,11 @@ class Store:
                     if metadata.get("entry_id"):
                         db.execute("UPDATE documents SET device_entry_id=? WHERE id=?", (metadata["entry_id"], row["id"]))
             db.execute("CREATE INDEX IF NOT EXISTS documents_device_id ON documents(device_entry_id)")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(notes)")}
+            for name, declaration in (("ignored", "INTEGER NOT NULL DEFAULT 0"), ("ignore_version", "INTEGER NOT NULL DEFAULT 0"), ("activity_at", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE notes ADD COLUMN {name} {declaration}")
+            db.execute("UPDATE notes SET activity_at=COALESCE((SELECT created_at FROM answers WHERE id=notes.answer_id),first_seen) WHERE activity_at IS NULL")
             db.execute("UPDATE jobs SET status='interrupted',message='上次运行中断，可重新同步',updated_at=? WHERE status IN ('queued','running','waiting_pin')", (now(),))
 
     @contextmanager
@@ -134,8 +139,12 @@ class Store:
     def document_at(self, path):
         return self.one("SELECT * FROM documents WHERE remote_path=?", (path,))
 
-    def notes(self, search="", status="all", document_id=None):
+    def notes(self, search="", status="all", document_id=None, include_ignored=False, order="latest"):
         where, values = ["n.archived=0"], []
+        if status == "ignored":
+            where.append("n.ignored=1")
+        elif not include_ignored:
+            where.append("n.ignored=0")
         if search:
             where.append("(n.title LIKE ? OR n.transcript LIKE ? OR n.question LIKE ? OR n.tags LIKE ? OR a.payload LIKE ?)")
             values += ["%" + search + "%"] * 5
@@ -143,17 +152,58 @@ class Store:
             where.append("n.unread=1")
         elif status == "pending":
             where.append("n.status IN ('pending','recognized','error')")
-        elif status != "all":
+        elif status not in ("all", "ignored"):
             where.append("n.status=?")
             values.append(status)
         if document_id:
             where.append("n.document_id=?")
             values.append(document_id)
+        ordering = "julianday(n.first_seen),n.id" if order == "thread" else "n.unread DESC,n.time_trusted DESC,COALESCE(n.device_modified,n.last_seen) DESC,n.id DESC"
         rows = self.query("""SELECT n.*,d.title AS document_title,d.name AS document_name,
             d.remote_path,a.payload AS answer_payload,a.model AS answer_model,a.provenance AS answer_provenance,
             a.created_at AS answered_at FROM notes n JOIN documents d ON d.id=n.document_id
-            LEFT JOIN answers a ON a.id=n.answer_id WHERE """ + " AND ".join(where) + " ORDER BY n.unread DESC,n.time_trusted DESC,COALESCE(n.device_modified,n.last_seen) DESC,n.id DESC", values)
+            LEFT JOIN answers a ON a.id=n.answer_id WHERE """ + " AND ".join(where) + " ORDER BY "+ordering, values)
         return [self.decode_note(row) for row in rows]
+
+    def channels(self, search="", status="all"):
+        conditions, values = [], [1 if status == "ignored" else 0]
+        if search:
+            conditions.append("(d.title LIKE ? OR d.name LIKE ? OR EXISTS (SELECT 1 FROM visible v WHERE v.document_id=d.id AND (v.title LIKE ? OR v.transcript LIKE ? OR v.question LIKE ? OR v.tags LIKE ? OR v.payload LIKE ?)))")
+            values += ["%"+search+"%"]*7
+        filters = {"unread": "SUM(n.unread)>0", "pending": "SUM(n.status IN ('pending','recognized','error'))>0", "needs_review": "SUM(n.status='needs_review')>0"}
+        rows = self.query("""WITH visible AS (
+            SELECT n.*,a.payload FROM notes n LEFT JOIN answers a ON a.id=n.answer_id
+            WHERE n.archived=0 AND n.ignored=?
+        ), ranked AS (
+            SELECT *,ROW_NUMBER() OVER(PARTITION BY document_id ORDER BY julianday(COALESCE(activity_at,first_seen)) DESC,id DESC) AS rank
+            FROM visible
+        ) SELECT d.id,d.title,d.name,d.remote_path,d.device_present,d.tracked,
+            COUNT(*) AS notes,SUM(n.unread) AS unread,SUM(n.status='needs_review') AS needs_review,
+            SUM(n.status IN ('pending','recognized','error')) AS pending,
+            MAX(CASE WHEN n.rank=1 THEN COALESCE(n.activity_at,n.first_seen) END) AS last_activity,
+            MAX(CASE WHEN n.rank=1 THEN COALESCE(NULLIF(n.question,''),NULLIF(n.transcript,''),n.title) END) AS last_snippet,
+            MAX(CASE WHEN n.rank=1 AND n.status='answered' THEN n.payload END) AS latest_answer
+            FROM ranked n JOIN documents d ON d.id=n.document_id"""+
+            (" WHERE "+" AND ".join(conditions) if conditions else "")+" GROUP BY d.id"+
+            (" HAVING "+filters[status] if status in filters else "")+
+            " ORDER BY (SUM(n.unread)>0) DESC,julianday(last_activity) DESC,d.id", values)
+        for row in rows:
+            answer = json.loads(row.pop("latest_answer") or "null")
+            if isinstance(answer, dict) and isinstance(answer.get("summary"), str):
+                row["last_snippet"] = answer["summary"]
+            row["last_snippet"] = (row["last_snippet"] or "")[:200]
+        return rows
+
+    def mark_answers_read(self, document_id, answer_ids):
+        if not answer_ids:
+            return []
+        placeholders = ",".join("?" for _ in answer_ids)
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            condition = "document_id=? AND archived=0 AND ignored=0 AND unread=1 AND answer_id IN ("+placeholders+")"
+            rows = db.execute("SELECT answer_id FROM notes WHERE "+condition, (document_id,*answer_ids)).fetchall()
+            db.execute("UPDATE notes SET unread=0 WHERE "+condition, (document_id,*answer_ids))
+        return [row["answer_id"] for row in rows]
 
     @staticmethod
     def decode_note(row):
@@ -176,7 +226,7 @@ class Store:
     def save_answer(self, note_id, answer, model, provenance="model"):
         with self.db() as db:
             cursor = db.execute("INSERT INTO answers(note_id,payload,model,provenance,created_at) VALUES(?,?,?,?,?)", (note_id, encode(answer), model, provenance, now()))
-            db.execute("UPDATE notes SET answer_id=?,status='answered',unread=1,error='',last_seen=? WHERE id=?", (cursor.lastrowid, now(), note_id))
+            db.execute("UPDATE notes SET answer_id=?,status='answered',unread=1,error='',last_seen=?,activity_at=? WHERE id=?", (cursor.lastrowid, now(), now(), note_id))
             row = db.execute("SELECT tags,title FROM notes WHERE id=?", (note_id,)).fetchone()
             existing = json.loads(row["tags"] or "[]")
             tags = answer.get("tags", [])
@@ -194,7 +244,8 @@ class Store:
             COALESCE(SUM(status IN ('pending','recognized','error')),0) AS pending,
             COALESCE(SUM(status='needs_review'),0) AS needs_review,
             COALESCE(SUM(status='answered'),0) AS answered,
-            COALESCE(SUM(unread),0) AS unread FROM notes WHERE archived=0""")
+            COALESCE(SUM(unread),0) AS unread FROM notes WHERE archived=0 AND ignored=0""")
+        row["ignored"] = self.one("SELECT COUNT(*) AS count FROM notes WHERE archived=0 AND ignored=1")["count"]
         row["documents"] = self.one("SELECT COUNT(*) AS count FROM documents WHERE tracked=1")["count"]
         return row
 

@@ -136,6 +136,23 @@ def group_time(group):
             (max(valid).astimezone(timezone.utc).isoformat() if valid else None), bool(valid))
 
 
+def render_page_context(pdf, page_number, destination):
+    """Cache one annotated page so scanned questions retain their printed context."""
+    destination = Path(destination)
+    if destination.is_file():
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix="dpt-page-") as temporary:
+        prefix = Path(temporary)/"page"
+        result = subprocess.run(["pdftoppm", "-f", str(page_number), "-l", str(page_number),
+                                 "-singlefile", "-scale-to", "2400", "-jpeg", "-jpegopt", "quality=90",
+                                 str(pdf), str(prefix)], capture_output=True, timeout=75)
+        if result.returncode:
+            raise RuntimeError("PDF 页面渲染失败："+result.stderr.decode(errors="replace")[:200])
+        destination.write_bytes(prefix.with_suffix(".jpg").read_bytes())
+    return destination
+
+
 def ingest_pdf(store, data_dir, document_id, path, metadata=None):
     data_dir, path = Path(data_dir), Path(path)
     binary = path.read_bytes()
@@ -177,7 +194,7 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
         if old:
             store.execute("""UPDATE notes SET snapshot_id=?,content_hash=?,preview_path=?,source_text=?,
                 device_created=?,device_modified=?,time_trusted=?,last_seen=?,status='pending',
-                confidence=NULL,manual_transcript=0,archived=0,error='',unread=0 WHERE id=?""", (*values.values(), old["id"]))
+                confidence=NULL,manual_transcript=0,archived=0,error='',unread=0,activity_at=? WHERE id=?""", (*values.values(), now(), old["id"]))
             store.execute("UPDATE notes SET transcript=?,question='',anchor='' WHERE id=?", (text, old["id"]))
             changed_notes.append(old["id"])
         else:
@@ -188,6 +205,7 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
                  str(preview), page_texts[group[0]["page"]], title, text, created, modified,
                  int(reliable), now(), now()))
             changed_notes.append(identifier)
+            store.execute("UPDATE notes SET activity_at=first_seen WHERE id=?", (identifier,))
     for old in store.query("SELECT id,group_key FROM notes WHERE document_id=? AND archived=0", (document_id,)):
         if old["group_key"] not in active:
             store.execute("UPDATE notes SET archived=1 WHERE id=?", (old["id"],))

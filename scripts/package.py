@@ -65,17 +65,17 @@ def package(destination, include_pairing=False):
     destination = Path(destination).resolve()
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     release = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    source = destination/"n2-study-code.tar.gz"
+    source = destination/"dpt-syncer-code.tar.gz"
     files = application_sources(ROOT)
-    files += [ROOT/p for p in ["Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example", "README.md", "LICENSE",
-        "scripts/install_study_remote.sh",
-        "scripts/deploy.sh", "scripts/deploy.py", "scripts/package_study.py", "scripts/open.command", "scripts/start_study.command",
-        "docs/study-app.md", "docs/legacy-material-tools.md"]]
-    files += list((ROOT/"tests").glob("test_study*.py"))
-    files += list((ROOT/"tests").glob("test_study*.cjs"))
+    files += [ROOT/p for p in ["Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example", "README.md", "LICENSE", "requirements.txt",
+        "scripts/install_remote.sh",
+        "scripts/deploy.sh", "scripts/deploy.py", "scripts/package.py", "scripts/open.command", "scripts/start.command",
+        "docs/usage.md"]]
+    files += list((ROOT/"tests").glob("test_*.py"))
+    files += list((ROOT/"tests").glob("test_*.cjs"))
     build_source_archive(files, source)
-    seed = destination/"n2-study-private-seed.tar.gz"
-    with tempfile.TemporaryDirectory(prefix="n2-study-seed-") as temporary:
+    seed = destination/"dpt-syncer-private-seed.tar.gz"
+    with tempfile.TemporaryDirectory(prefix="dpt-syncer-seed-") as temporary:
         data = Path(temporary)/"data"
         service = Service(data, ROOT/".tools/dpt-auth")
         auth = Path(os.environ.get("DPT_AUTH_DIR", ROOT/".tools/dpt-auth"))

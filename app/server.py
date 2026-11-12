@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from pypdf import PdfReader
 
 from .bootstrap import relocate
+from .paths import database_path, default_data_dir
 from .service import ROOT, Service
 from .web_auth import WebAuth
 from .scope import in_folders
@@ -35,18 +36,31 @@ def public_note(note, folders=None):
 
 def markdown_export(service):
     lines = ["# 文档笔记归档", "", "导出自墨记。手写识别与模型解答可能需要核对。", ""]
-    for note in service.store.notes():
+    for note in service.store.notes(include_ignored=True):
         lines += ["## "+note["title"], "", f"来源：{note['document_title']}，第 {note['page']} 页", "",
                   "笔迹："+note["transcript"], "", "问题："+note["question"], ""]
+        if note["ignored"]:
+            lines += ["状态：已忽略（保留归档，可恢复）", ""]
         if note["answer"]:
             answer = note["answer"]
             lines += [answer["summary"], "", answer["explanation"], ""]
+            reviews = answer.get("exercise_reviews", [])
+            for review in reviews if isinstance(reviews, list) else []:
+                if not isinstance(review, dict):
+                    continue
+                verdict = {"correct": "模型判断：答对", "incorrect": "模型判断：答错"}.get(review.get("verdict"), "暂不能判定")
+                basis = {"document": "依据文中答案（模型核对）", "reasoning": "模型推导的参考解答"}.get(review.get("basis"), "需要补充题目或作答信息")
+                lines += ["### "+str(review.get("question_ref") or "当前题目"), "", verdict, "", str(review.get("question", "")), "",
+                          "你的作答："+str(review.get("user_answer") or "待确认"), "", "建议答案："+str(review.get("suggested_answer") or "待补充"), "",
+                          basis, "", str(review.get("explanation", "")), ""]
+                if review.get("reference_quote"):
+                    lines += ["原文答案引用："+str(review["reference_quote"]), ""]
+                points = review.get("knowledge_points", [])
+                if isinstance(points, list):
+                    lines += ["- "+point for point in points if isinstance(point, str)]
             for example in answer.get("examples", []):
                 if isinstance(example, dict):
                     lines += ["- "+str(example.get("text", example.get("ja", "")))+" — "+str(example.get("explanation", example.get("zh", "")))]
-            for practice in answer.get("practice", []):
-                if isinstance(practice, dict):
-                    lines += ["", "练习："+str(practice.get("question", "")), "", "答案："+str(practice.get("answer", "")), str(practice.get("explanation", ""))]
             for source in answer.get("sources", []):
                 lines += ["", "参考："+str(source)]
             lines += ["", "来源与生成方式："+note["answer_model"], ""]
@@ -148,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             authenticated = not self.web_auth or self.web_auth.valid(self.headers.get("Cookie"))
             if not mutation and path == "/api/health":
-                return self.json({"ok": True, "service": "n2-study", "version": 1})
+                return self.json({"ok": True, "service": "dpt-syncer", "version": 1})
             if mutation and path == "/api/login":
                 body = self.json_body()
                 if not self.web_auth:
@@ -177,7 +191,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/state":
                 return self.json(dict(self.service.state(), auth_required=bool(self.web_auth)))
             if path == "/api/notes":
-                return self.json([public_note(note, self.service.settings()["sync_folders"]) for note in self.service.store.notes(query.get("q", [""])[0][:200], query.get("status", ["all"])[0])])
+                document = query.get("document_id", [None])[0]
+                if document and not re.fullmatch(r"[a-f0-9]{24}", document):
+                    raise ValueError("无效的文档标识")
+                return self.json([public_note(note, self.service.settings()["sync_folders"]) for note in self.service.store.notes(
+                    query.get("q", [""])[0][:200], query.get("status", ["all"])[0], document,
+                    order=query.get("order", ["latest"])[0])])
+            if path == "/api/channels":
+                channels = self.service.store.channels(query.get("q", [""])[0][:200], query.get("status", ["all"])[0])
+                for channel in channels:
+                    channel["in_sync_scope"] = self.service.in_scope(channel["remote_path"])
+                return self.json(channels)
             match = re.fullmatch(r"/api/notes/(\d+)", path)
             if match:
                 note = self.service.store.note(int(match[1]))
@@ -197,8 +221,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/export.md":
                 return self.send_bytes(markdown_export(self.service).encode(), "text/markdown; charset=utf-8", attachment="dpt-notes.md")
             if path == "/api/backup.sqlite3":
-                with tempfile.TemporaryDirectory(prefix="n2-backup-") as folder:
-                    backup = Path(folder)/"study.sqlite3"
+                with tempfile.TemporaryDirectory(prefix="dpt-backup-") as folder:
+                    backup = Path(folder)/"notes.sqlite3"
                     self.service.store.backup(backup)
                     return self.file(backup, "application/vnd.sqlite3", "dpt-archive.sqlite3")
             match = re.fullmatch(r"/api/answers/(\d+)", path)
@@ -278,19 +302,37 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/device/pin":
             self.service.submit_pin(body.get("pin", ""))
             return self.json({"ok": True})
-        match = re.fullmatch(r"/api/notes/(\d+)/(edit|analyze|read)", path)
+        match = re.fullmatch(r"/api/notes/(\d+)/(edit|analyze|read|ignore)", path)
         if match:
             identifier, action = int(match[1]), match[2]
             if not self.service.store.note(identifier):
                 raise FileNotFoundError("笔记不存在")
             if action == "edit":
                 return self.json(public_note(self.service.edit_note(identifier, body)))
+            if action == "ignore":
+                return self.json(public_note(self.service.ignore_note(identifier, body.get("ignored")), self.service.settings()["sync_folders"]))
             if action == "analyze":
+                if self.service.store.note(identifier)["ignored"]:
+                    raise ValueError("请先恢复这条笔记，再解读")
                 if not self.service.in_scope(self.service.store.note(identifier)["remote_path"]):
                     raise ValueError("这条笔记不在同步范围，请先添加它所在的文件夹")
                 return self.json(self.service.enqueue("analyze", identifier), 202)
-            self.service.store.execute("UPDATE notes SET unread=0 WHERE id=?", (identifier,))
-            return self.json({"ok": True})
+            note = self.service.store.note(identifier)
+            answer_id = body.get("answer_id")
+            if type(answer_id) is not int or answer_id <= 0:
+                raise ValueError("请提供已看到的解读标识")
+            if answer_id != note["answer_id"]:
+                return self.json({"ok": True, "marked": []})
+            marked = self.service.store.mark_answers_read(note["document_id"], [answer_id] if answer_id else [])
+            return self.json({"ok": True, "marked": marked})
+        match = re.fullmatch(r"/api/documents/([a-f0-9]{24})/read", path)
+        if match:
+            if not self.service.store.document(match[1]):
+                raise FileNotFoundError("文件不存在")
+            answers = body.get("answer_ids")
+            if not isinstance(answers, list) or len(answers)>500 or any(type(value) is not int or value<=0 for value in answers):
+                raise ValueError("请选择最多 500 条已看到的回复")
+            return self.json({"ok": True, "marked": self.service.store.mark_answers_read(match[1], list(dict.fromkeys(answers)))})
         match = re.fullmatch(r"/api/documents/([a-f0-9]{24})/(track|pull)", path)
         if match:
             if not self.service.store.document(match[1]):
@@ -309,14 +351,14 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     load_env(ROOT/".env")
     parser = argparse.ArgumentParser(description="墨记 · 文档与笔记助手")
-    parser.add_argument("--data", type=Path, default=Path(os.environ.get("APP_DATA_DIR", ROOT/"output/study")))
+    parser.add_argument("--data", type=Path, default=default_data_dir())
     parser.add_argument("--auth", type=Path, default=Path(os.environ.get("DPT_AUTH_DIR", ROOT/".tools/dpt-auth")))
     parser.add_argument("--bind", default=os.environ.get("APP_BIND", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("APP_PORT", 4387)))
     parser.add_argument("--no-bootstrap", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.umask(0o077)
-    if (args.data/"study.sqlite3").exists():
+    if database_path(args.data).exists():
         relocate(args.data)
     service = Service(args.data, args.auth)
     server = ThreadingHTTPServer((args.bind, args.port), Handler)

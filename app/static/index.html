@@ -28,9 +28,14 @@
     <section id="view-notes" class="view">
       <div class="page-heading"><div><p class="eyebrow">YOUR NOTES, CONNECTED</p><h1>笔记与解答</h1><p class="subtitle">把设备上留下的疑问，一点点弄明白。</p></div><a class="button quiet" href="/api/export.md" download>↓ 导出笔记</a></div>
       <div class="stats-row" id="stats"></div>
-      <div class="notes-workspace">
+      <div class="notes-workspace document-mode" id="notes-workspace">
+        <section class="document-browser" id="document-browser" aria-label="PDF 文档列表">
+          <div class="panel-heading"><span class="panel-label">01 / PDF</span><h2>文档</h2></div>
+          <div id="document-list" class="document-list"><div class="empty">正在读取文档…</div></div>
+          <div id="document-count" class="list-foot"></div>
+        </section>
         <section class="note-browser" aria-label="笔记列表">
-          <div class="list-toolbar"><label class="search-box"><span>⌕</span><input id="note-search" type="search" placeholder="搜索笔记、标签、解答" aria-label="搜索笔记"></label><div class="filter-row"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="unread">新回复</button><button class="filter" data-filter="pending">待解读</button><button class="filter" data-filter="needs_review">待确认</button></div></div>
+          <div class="list-toolbar"><div class="note-modes" role="group" aria-label="笔记组织方式"><button class="active" data-note-mode="documents" aria-pressed="true">按 PDF</button><button data-note-mode="timeline" aria-pressed="false">按时间</button></div><div class="notes-heading"><span class="panel-label">02 / 笔记</span><h2 id="notes-heading">先选择 PDF</h2></div><label class="search-box"><span>⌕</span><input id="note-search" type="search" placeholder="搜索文档、笔记、解答" aria-label="搜索文档与笔记"></label><div class="filter-row"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="unread">新回复</button><button class="filter" data-filter="pending">待解读</button><button class="filter" data-filter="needs_review">待确认</button><button class="filter" data-filter="ignored">已忽略</button></div></div>
           <div id="note-list" class="note-list"><div class="empty">正在打开笔记…</div></div>
           <div class="list-foot" id="note-count"></div>
         </section>

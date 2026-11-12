@@ -6,10 +6,11 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,16 @@ def validate_web_url(value):
     return value.rstrip("/")
 
 
+def deployment_location():
+    root = os.environ.get("DPT_REMOTE_ROOT") or "apps/dpt-syncer"
+    project = os.environ.get("DPT_DEPLOY_PROJECT") or "dpt-syncer"
+    if not re.fullmatch(r"[A-Za-z0-9_./-]+", root) or PurePosixPath(root).is_absolute() or any(part in ("", ".", "..") for part in root.split("/")):
+        raise ValueError("DPT_REMOTE_ROOT 必须是相对远端用户主目录的安全目录路径")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
+        raise ValueError("DPT_DEPLOY_PROJECT 必须是有效的 Compose 项目名")
+    return root, project
+
+
 def write_options(path):
     values = {key: os.environ[key] for key in ("DPT_ADDRESS", "APP_LISTEN_ADDRESS", "APP_ALLOWED_HOSTS") if os.environ.get(key)}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,19 +53,22 @@ def write_options(path):
 
 def deploy(target, include_pairing=False):
     target = validate_target(target)
-    command = [sys.executable, str(ROOT/"scripts/package_study.py")]
+    remote_root, project = deployment_location()
+    command = [sys.executable, str(ROOT/"scripts/package.py")]
     if include_pairing:
         command.append("--include-pairing")
     subprocess.run(command, cwd=ROOT, check=True)
     output = ROOT/"output/deploy"
     options = output/"deploy-options.json"
     write_options(options)
-    subprocess.run(["ssh", target, 'set -eu; test "$(uname -s)" = Linux; command -v docker >/dev/null; docker compose version >/dev/null; docker info >/dev/null; command -v python3 >/dev/null; umask 077; mkdir -p "$HOME/apps/n2-study/incoming"'], check=True)
-    files = [output/name for name in ("n2-study-code.tar.gz", "n2-study-private-seed.tar.gz", "manifest.json", "deploy-options.json")]
-    subprocess.run(["scp", *map(str, files), target+":apps/n2-study/incoming/"], check=True)
-    with (ROOT/"scripts/install_study_remote.sh").open("rb") as script:
-        subprocess.run(["ssh", target, "bash -s"], stdin=script, check=True)
-    url = subprocess.check_output(["ssh", target, 'cat "$HOME/apps/n2-study/service-url.txt"']).decode().strip()
+    remote_path = '"$HOME/"'+shlex.quote(remote_root)
+    preflight = 'set -eu; test "$(uname -s)" = Linux; command -v docker >/dev/null; docker compose version >/dev/null; docker info >/dev/null; command -v python3 >/dev/null; umask 077; mkdir -p '+remote_path+'/incoming'
+    subprocess.run(["ssh", target, "sh -c "+shlex.quote(preflight)], check=True)
+    files = [output/name for name in ("dpt-syncer-code.tar.gz", "dpt-syncer-private-seed.tar.gz", "manifest.json", "deploy-options.json")]
+    subprocess.run(["scp", *map(str, files), target+":"+remote_root+"/incoming/"], check=True)
+    with (ROOT/"scripts/install_remote.sh").open("rb") as script:
+        subprocess.run(["ssh", target, "bash -s -- "+shlex.quote(remote_root)+" "+shlex.quote(project)], stdin=script, check=True)
+    url = subprocess.check_output(["ssh", target, "sh -c "+shlex.quote("cat "+remote_path+"/service-url.txt")]).decode().strip()
     url = validate_web_url(url)
     try:
         subprocess.run(["curl", "--silent", "--show-error", "--fail", "--noproxy", "*", "--max-time", "5", url+"/api/health"], stdout=subprocess.DEVNULL, check=True)

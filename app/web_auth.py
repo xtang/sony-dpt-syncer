@@ -13,7 +13,7 @@ import time
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
-COOKIE = "n2_study_session"
+COOKIE = "dpt_syncer_session"
 SESSION_SECONDS = 30*24*60*60
 
 

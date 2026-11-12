@@ -30,12 +30,21 @@ from app.web_auth import COOKIE, SESSION_SECONDS, WebAuth, create_access_file
 from app.scope import in_folders, normalize_folders
 from app.store import SCHEMA, Store
 from app.env import read_env, load_env
-from scripts.deploy import validate_target, validate_web_url, write_options
-from scripts.package_study import application_sources, copy_pairing_credentials
+from scripts.deploy import deployment_location, deploy, validate_target, validate_web_url, write_options
+from scripts.package import application_sources, copy_pairing_credentials
+from app.paths import DATABASE_NAME, LEGACY_DATABASE_NAME, database_path, default_data_dir
 from dptrp1.dptrp1 import ResolveObjectFailed
 
 
-def fixture_pdf(path, position=120, include=True, date=None, rotation=0):
+def exercise_review(**changes):
+    result=dict(question_ref='第1题',question='2 + 3 = ? A. 4 B. 5 C. 6',user_answer='A. 4',
+                suggested_answer='B. 5',verdict='incorrect',basis='reasoning',confidence=.98,reference_quote='',
+                explanation='2 加 3 等于 5；选项 A 的结果少算了 1。应选 B。',knowledge_points=['加法表示合并两个数量，2 + 3 = 5。'])
+    result.update(changes)
+    return result
+
+
+def fixture_pdf(path, position=120, include=True, date=None, rotation=0, extra_note=False):
     writer = PdfWriter()
     page = writer.add_blank_page(width=595, height=842)
     if rotation:
@@ -47,6 +56,11 @@ def fixture_pdf(path, position=120, include=True, date=None, rotation=0):
             NameObject('/InkList'):ArrayObject([ArrayObject([FloatObject(v) for v in (100,100,position,140)])]),
             NameObject('/M'):TextStringObject(date or datetime.now(timezone.utc).strftime('D:%Y%m%d%H%M%SZ'))})
         page[NameObject('/Annots')] = ArrayObject([writer._add_object(ann)])
+        if extra_note:
+            second=DictionaryObject({NameObject('/Type'):NameObject('/Annot'),NameObject('/Subtype'):NameObject('/Ink'),
+                NameObject('/NM'):TextStringObject('second-uuid'),NameObject('/Rect'):ArrayObject([FloatObject(v) for v in (300,500,400,550)]),
+                NameObject('/InkList'):ArrayObject([ArrayObject([FloatObject(v) for v in (300,500,350,530)])])})
+            page[NameObject('/Annots')].append(writer._add_object(second))
     with Path(path).open('wb') as file:
         writer.write(file)
 
@@ -84,7 +98,7 @@ class FakePaper:
         return response
 
 
-class StudyCase(unittest.TestCase):
+class SyncerCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -148,7 +162,7 @@ class StudyCase(unittest.TestCase):
         status,body=self.request('/',host='192.0.2.10:4387')
         self.assertEqual(status,200)
         self.assertIn('访问口令'.encode(),body)
-        for path in ['/api/state','/api/notes','/api/folders','/api/export.json','/api/backup.sqlite3','/app.js']:
+        for path in ['/api/state','/api/notes','/api/channels','/api/folders','/api/export.json','/api/backup.sqlite3','/app.js']:
             self.assertEqual(self.request(path,host='192.0.2.10:4387')[0],401)
         self.assertEqual(self.request('/api/sync','POST',host='192.0.2.10:4387')[0],401)
         self.assertEqual(self.service.store.query('SELECT * FROM jobs'),[])
@@ -246,6 +260,226 @@ class StudyCase(unittest.TestCase):
         self.assertEqual(self.service.store.note(identifier)['status'],'answered')
         self.assertEqual(self.service.store.stats()['unread'],1)
 
+    def test_ignore_is_reversible_and_preserves_notes_answers_and_exports(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.store.save_answer(identifier,dict(summary='Saved reply',explanation='Saved details'),'model')
+        self.service.store.execute("UPDATE notes SET status='needs_review' WHERE id=?",(identifier,))
+        preview=Path(self.service.store.note(identifier)['preview_path'])
+        status,body=self.request(f'/api/notes/{identifier}/ignore','POST',{'ignored':True})
+        self.assertEqual(status,200)
+        self.assertTrue(json.loads(body)['ignored'])
+        self.assertTrue(preview.exists())
+        self.assertEqual(self.service.store.notes(),[])
+        self.assertEqual(self.service.store.stats()['needs_review'],0)
+        self.assertEqual(self.service.store.stats()['unread'],0)
+        self.assertEqual(self.service.store.stats()['ignored'],1)
+        self.assertEqual(self.service.report()['next_steps'],[])
+        self.assertEqual(json.loads(self.request('/api/notes?status=ignored')[1])[0]['id'],identifier)
+        self.assertTrue(json.loads(self.request('/api/export.json')[1])['notes'][0]['ignored'])
+        self.assertIn('已忽略'.encode(),self.request('/api/export.md')[1])
+        self.assertEqual(self.request(f'/api/notes/{identifier}/analyze','POST')[0],400)
+        self.assertEqual(self.request(f'/api/notes/{identifier}/edit','POST',{'transcript':'new'})[0],400)
+        self.assertEqual(self.request(f'/api/notes/{identifier}/ignore','POST',{'ignored':False})[0],200)
+        note=self.service.store.note(identifier)
+        self.assertFalse(note['ignored'])
+        self.assertEqual(note['answer']['summary'],'Saved reply')
+        self.assertEqual(note['status'],'needs_review')
+        self.assertEqual(note['unread'],0)
+        self.assertEqual(len(note['history']),1)
+
+    def test_ignored_handwriting_stays_ignored_after_changes_and_sync(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.ignore_note(identifier,True)
+        self.assertEqual(self.ingest()['notes'],[])
+        fixture_pdf(self.pdf,position=150)
+        self.assertEqual(self.ingest()['notes'],[identifier])
+        self.mock_inventory([self.entry])
+        self.service.model=Mock();self.service.model.ready.return_value=True
+        self.service.enqueue=Mock()
+        self.service.sync()
+        self.assertTrue(self.service.store.note(identifier)['ignored'])
+        self.assertEqual(self.service.store.notes(status='pending'),[])
+        self.service.enqueue.assert_not_called()
+        self.service.analyze(identifier)
+        self.service.model.recognize.assert_not_called()
+        self.service.model.answer.assert_not_called()
+
+    def test_ignore_during_recognition_discards_late_transcription(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.model=Mock()
+        def recognize(*args):
+            self.service.ignore_note(identifier,True)
+            return dict(transcript='late writing',question='late question',anchor='',title='late',kind='question',confidence=1,tags=[])
+        self.service.model.recognize.side_effect=recognize
+        self.service.analyze(identifier)
+        self.assertEqual(self.service.store.note(identifier)['transcript'],'')
+        self.service.model.answer.assert_not_called()
+
+    def test_ignore_while_preparing_images_stops_the_model_request(self):
+        identifier=self.ingest()['notes'][0]
+        from app.pdf_notes import render_page_context
+        def prepare(*args):
+            result=render_page_context(*args)
+            self.service.ignore_note(identifier,True)
+            return result
+        self.service.model=Mock()
+        with patch('app.service.render_page_context',side_effect=prepare):
+            self.service.analyze(identifier)
+        self.service.model.recognize.assert_not_called()
+        self.service.model.answer.assert_not_called()
+
+    def test_ignore_then_restore_during_answer_discards_the_old_result(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.edit_note(identifier,{'question':'question'})
+        self.service.model=Mock()
+        def answer(*args):
+            self.service.ignore_note(identifier,True)
+            self.service.ignore_note(identifier,False)
+            return dict(summary='late',explanation='late')
+        self.service.model.answer.side_effect=answer
+        self.service.analyze(identifier)
+        note=self.service.store.note(identifier)
+        self.assertFalse(note['ignored'])
+        self.assertIsNone(note['answer'])
+        self.assertEqual(note['status'],'recognized')
+
+    def test_ignore_during_failed_answer_does_not_restore_an_error(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.edit_note(identifier,{'question':'question'})
+        self.service.model=Mock()
+        def answer(*args):
+            self.service.ignore_note(identifier,True)
+            raise ModelError('late failure')
+        self.service.model.answer.side_effect=answer
+        with self.assertRaises(ModelError):self.service.analyze(identifier)
+        note=self.service.store.note(identifier)
+        self.assertTrue(note['ignored'])
+        self.assertEqual(note['error'],'')
+        self.assertEqual(note['status'],'recognized')
+
+    def test_ignore_requires_boolean_and_does_not_change_device_files(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.device=Mock()
+        for value in [None,1,'true',[]]:
+            self.assertEqual(self.request(f'/api/notes/{identifier}/ignore','POST',{'ignored':value})[0],400)
+        self.service.ignore_note(identifier,True)
+        self.service.ignore_note(identifier,True)
+        self.assertEqual(self.service.device.method_calls,[])
+        self.assertEqual(self.service.store.note(identifier)['ignore_version'],1)
+
+    def test_channels_group_documents_and_keep_full_counts_when_searching(self):
+        fixture_pdf(self.pdf,extra_note=True)
+        first,second=self.ingest()['notes']
+        self.service.store.save_answer(first,dict(summary='unique result',explanation='details'),'model')
+        self.service.store.execute("UPDATE notes SET status='needs_review' WHERE id=?",(second,))
+        other_entry=dict(self.entry,entry_path='Document/other.pdf',entry_id='other-device-file')
+        other=self.service.upsert_document(other_entry)
+        fixture_pdf(self.pdf)
+        other_note=ingest_pdf(self.service.store,self.service.data,other,self.pdf)['notes'][0]
+        self.service.store.save_answer(other_note,dict(summary='Other result',explanation='details'),'model')
+        self.service.store.execute("UPDATE notes SET activity_at='2026-11-12T01:00:00Z' WHERE document_id=?",(self.docid,))
+        self.service.store.execute("UPDATE notes SET activity_at='2026-11-12T10:00:00+08:00' WHERE document_id=?",(other,))
+        status,body=self.request('/api/channels')
+        self.assertEqual(status,200)
+        channels=json.loads(body)
+        self.assertEqual([row['id'] for row in channels],[other,self.docid])
+        target=channels[1]
+        self.assertEqual((target['notes'],target['unread'],target['needs_review']),(2,1,1))
+        search=json.loads(self.request('/api/channels?q=unique')[1])
+        self.assertEqual(len(search),1)
+        self.assertEqual(search[0]['notes'],2)
+        self.assertEqual(json.loads(self.request('/api/channels?status=needs_review')[1])[0]['id'],self.docid)
+        thread=json.loads(self.request(f'/api/notes?document_id={self.docid}&order=thread')[1])
+        self.assertEqual([note['id'] for note in thread],[first,second])
+        answer=self.service.store.note(other_note)['answer_id']
+        self.request(f'/api/documents/{other}/read','POST',{'answer_ids':[answer]})
+        self.assertEqual(json.loads(self.request('/api/channels')[1])[0]['id'],self.docid)
+        self.service.ignore_note(first,True)
+        self.assertEqual(self.service.store.channels(search='unique'),[])
+        self.assertEqual(self.service.store.channels(status='ignored')[0]['notes'],1)
+
+    def test_read_receipts_do_not_clear_newer_answers_or_other_documents(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.store.save_answer(identifier,dict(summary='first',explanation='details'),'model')
+        old=self.service.store.note(identifier)['answer_id']
+        self.service.store.save_answer(identifier,dict(summary='new',explanation='details'),'model')
+        latest=self.service.store.note(identifier)['answer_id']
+        other=self.service.upsert_document(dict(self.entry,entry_path='Document/other.pdf',entry_id='other-file'))
+        other_note=ingest_pdf(self.service.store,self.service.data,other,self.pdf)['notes'][0]
+        self.service.store.save_answer(other_note,dict(summary='other',explanation='details'),'model')
+        other_answer=self.service.store.note(other_note)['answer_id']
+        path=f'/api/documents/{self.docid}/read'
+        for answer in [old,other_answer]:
+            self.assertEqual(json.loads(self.request(path,'POST',{'answer_ids':[answer]})[1])['marked'],[])
+            self.assertTrue(self.service.store.note(identifier)['unread'])
+        self.request(f'/api/notes/{identifier}/read','POST',{'answer_id':old})
+        self.assertTrue(self.service.store.note(identifier)['unread'])
+        self.assertEqual(self.request(f'/api/notes/{identifier}/read','POST',{})[0],400)
+        for values in [[True],[-1],'all',None,list(range(1,502))]:
+            self.assertEqual(self.request(path,'POST',{'answer_ids':values})[0],400)
+        self.assertEqual(json.loads(self.request(path,'POST',{'answer_ids':[latest]})[1])['marked'],[latest])
+        self.assertFalse(self.service.store.note(identifier)['unread'])
+        self.assertTrue(self.service.store.note(other_note)['unread'])
+
+    def test_ignored_answers_are_not_related_context(self):
+        ignored=self.ingest()['notes'][0]
+        self.service.store.save_answer(ignored,dict(summary='ignored context',explanation='details',tags=['topic']),'model')
+        self.service.ignore_note(ignored,True)
+        other=self.service.upsert_document(dict(self.entry,entry_path='Document/other.pdf',entry_id='other-file'))
+        identifier=ingest_pdf(self.service.store,self.service.data,other,self.pdf)['notes'][0]
+        self.service.edit_note(identifier,{'question':'question'})
+        self.service.store.execute('UPDATE notes SET tags=? WHERE id=?',(json.dumps(['topic']),identifier))
+        self.service.model=Mock();self.service.model.answer.return_value=dict(summary='answer',explanation='details')
+        self.service.analyze(identifier)
+        self.assertEqual(self.service.model.answer.call_args.args[1],[])
+
+    def test_scanned_exercise_uses_page_images_and_archives_explanation(self):
+        identifier=self.ingest()['notes'][0]
+        self.assertEqual(self.service.store.note(identifier)['source_text'],'')
+        client=ModelClient(self.service.settings)
+        client.completion=Mock(side_effect=[
+            dict(transcript='第1题选 A',question='核对第1题的作答',anchor='2 + 3 = ?',title='第1题作答',kind='answer',confidence=.97,tags=['加法']),
+            dict(summary='第1题需要订正',explanation='详见逐题解析。',exercise_reviews=[exercise_review()])
+        ])
+        self.service.model=client
+        self.service.analyze(identifier)
+        note=self.service.store.note(identifier)
+        self.assertEqual(note['kind'],'answer')
+        self.assertEqual(note['answer']['exercise_reviews'][0]['verdict'],'incorrect')
+        self.assertEqual(note['answer']['exercise_reviews'][0]['knowledge_points'],exercise_review()['knowledge_points'])
+        self.assertTrue(note['unread'])
+        for call in client.completion.call_args_list:
+            content=call.args[0][1]['content']
+            images=[part['image_url']['url'] for part in content if part['type']=='image_url']
+            self.assertEqual(len(images),2)
+            self.assertTrue(images[0].startswith('data:image/png;base64,'))
+            self.assertTrue(images[1].startswith('data:image/jpeg;base64,'))
+        payload=json.loads(client.completion.call_args_list[1].args[0][1]['content'][0]['text'])
+        self.assertEqual(payload['transcript'],'第1题选 A')
+        self.assertNotIn(str(self.service.data),json.dumps(payload))
+        self.assertEqual(len(list((self.service.data/'page-context').glob('*.jpg'))),1)
+        status,body=self.request('/api/export.md')
+        self.assertEqual(status,200)
+        for text in ['第1题','A. 4','B. 5','少算了 1','加法表示合并两个数量','模型推导的参考解答']:
+            self.assertIn(text.encode(),body)
+        api=json.loads(self.request(f'/api/notes/{identifier}')[1])
+        self.assertEqual(api['answer']['exercise_reviews'],note['answer']['exercise_reviews'])
+        self.assertNotIn('page_image_path',api)
+
+    def test_inflight_review_is_discarded_when_pdf_version_changes(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.edit_note(identifier,{'transcript':'第1题选 A'})
+        self.service.model=Mock()
+        def changed_page(*args):
+            writer=PdfWriter(clone_from=self.pdf)
+            writer.add_metadata({'/Title':'Updated question page'})
+            with self.pdf.open('wb') as file:writer.write(file)
+            self.ingest()
+            return dict(summary='stale',explanation='stale',exercise_reviews=[exercise_review()])
+        self.service.model.answer.side_effect=changed_page
+        self.service.analyze(identifier)
+        self.assertIsNone(self.service.store.note(identifier)['answer'])
+
     def test_inflight_answer_cannot_overwrite_newly_edited_note(self):
         identifier = self.ingest()['notes'][0]
         self.service.edit_note(identifier, {'question':'old question'})
@@ -325,6 +559,21 @@ class StudyCase(unittest.TestCase):
         self.assertTrue(Path(note['preview_path']).is_relative_to(copied.resolve()))
         snap=other.store.one('SELECT * FROM snapshots')
         self.assertTrue(Path(snap['pdf_path']).exists())
+
+    def test_legacy_database_keeps_notes_answers_and_saved_settings(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.store.save_answer(identifier,dict(summary='Saved answer',explanation='Details'),'previous-model')
+        self.service.save_settings({'model_api_key':'preserved-test-key'})
+        with self.service.store.db() as db:
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        current=self.service.data/DATABASE_NAME
+        legacy=self.service.data/LEGACY_DATABASE_NAME
+        self.assertTrue(current.exists())
+        current.rename(legacy)
+        reopened=Service(self.service.data,self.root/'auth')
+        self.assertEqual(reopened.store.note(identifier)['answer']['summary'],'Saved answer')
+        self.assertEqual(reopened.settings()['model_api_key'],'preserved-test-key')
+        self.assertFalse(current.exists())
 
     def test_slow_model_does_not_block_device_operations(self):
         identifier=self.ingest()['notes'][0]
@@ -665,8 +914,109 @@ class StudyCase(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_existing_note_database_migration_keeps_saved_replies_and_read_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'existing.sqlite3'
+            with sqlite3.connect(path) as db:
+                db.executescript(SCHEMA)
+                self.assertNotIn('ignored',{row[1] for row in db.execute('PRAGMA table_info(notes)')})
+                db.execute("INSERT INTO documents(id,remote_path,name,title,created_at) VALUES(?,?,?,?,?)",('a'*24,'Document/existing.pdf','existing.pdf','Existing','2026-11-12T01:00:00Z'))
+                db.execute("INSERT INTO snapshots(id,document_id,sha256,pdf_path,captured_at) VALUES(?,?,?,?,?)",(1,'a'*24,'hash','existing.pdf','2026-11-12T01:00:00Z'))
+                db.execute("INSERT INTO notes(id,document_id,page,group_key,content_hash,annotation_ids,snapshot_id,title,first_seen,last_seen,unread,status,answer_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(1,'a'*24,1,'group','hash','[]',1,'Question','2026-11-12T01:00:00Z','2026-11-12T04:00:00Z',1,'answered',1))
+                db.execute("INSERT INTO answers(id,note_id,payload,model,provenance,created_at) VALUES(?,?,?,?,?,?)",(1,1,json.dumps(dict(summary='Saved',explanation='Details')),'model','model','2026-11-12T02:00:00Z'))
+            store=Store(path)
+            note=store.note(1)
+            self.assertEqual(note['answer']['summary'],'Saved')
+            self.assertEqual((note['ignored'],note['ignore_version'],note['unread']),(0,0,1))
+            self.assertEqual(note['activity_at'],'2026-11-12T02:00:00Z')
+            self.assertEqual(store.channels()[0]['unread'],1)
+            Store(path)
+            self.assertEqual(store.note(1)['activity_at'],note['activity_at'])
+
+    def exercise_answer(self,reviews,source='Question and options',**note_changes):
+        note=dict(question='',transcript='第1题选 A',anchor='',document_title='练习文档',page=1,source_text=source,kind='answer')
+        note.update(note_changes)
+        client=ModelClient(lambda:{})
+        client.completion=Mock(return_value=dict(summary='作答核对',explanation='解析',exercise_reviews=reviews))
+        return client.answer(note,[])
+
+    def test_exercise_review_preserves_wrong_and_correct_answers(self):
+        correct=exercise_review(question_ref='第2题',user_answer='B. 5',verdict='correct',explanation='2 + 3 = 5，选择正确。')
+        result=self.exercise_answer([exercise_review(),correct])
+        self.assertEqual([row['verdict'] for row in result['exercise_reviews']],['incorrect','correct'])
+        self.assertEqual(result['exercise_reviews'][0]['explanation'],exercise_review()['explanation'])
+        self.assertEqual(result['exercise_reviews'][0]['basis'],'reasoning')
+
+    def test_incomplete_or_uncertain_exercises_cannot_be_marked_wrong(self):
+        cases=[dict(user_answer=''),dict(question=''),dict(suggested_answer=''),dict(explanation=''),
+               dict(confidence=.6),dict(confidence=float('nan')),dict(confidence='invalid'),
+               dict(basis='insufficient'),dict(verdict='guaranteed-wrong'),dict(suggested_answer='A. 4')]
+        for values in cases:
+            with self.subTest(values=values):
+                result=self.exercise_answer([exercise_review(**values)])['exercise_reviews'][0]
+                self.assertEqual(result['verdict'],'uncertain')
+                self.assertIn('暂不判断对错',result['explanation'])
+
+    def test_document_answer_quote_must_occur_in_supplied_pdf_text(self):
+        row=exercise_review(basis='document',reference_quote='第1题：B')
+        supported=self.exercise_answer([row],source='参考答案\n第1题： B\n第2题：A')['exercise_reviews'][0]
+        self.assertEqual(supported['basis'],'document')
+        self.assertEqual(supported['verdict'],'incorrect')
+        self.assertEqual(supported['reference_quote'],'第1题：B')
+        unsupported=self.exercise_answer([row])['exercise_reviews'][0]
+        self.assertEqual(unsupported['basis'],'reasoning')
+        self.assertEqual(unsupported['verdict'],'uncertain')
+        self.assertEqual(unsupported['reference_quote'],'')
+
+    def test_reading_mark_in_exam_does_not_require_an_exercise_review(self):
+        result=self.exercise_answer([],document_title='历年真题',kind='mark',transcript='',anchor='圈出需要解释的概念')
+        self.assertEqual(result['exercise_reviews'],[])
+        malformed=self.exercise_answer([None,True,'incorrect'])
+        self.assertEqual(malformed['exercise_reviews'],[])
+
+    def test_storage_defaults_and_ambiguous_databases(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            with patch('app.paths.ROOT',root),patch.dict(os.environ,{},clear=True):
+                self.assertEqual(default_data_dir(),root/'output/data')
+                legacy=root/'output/study'/LEGACY_DATABASE_NAME
+                legacy.parent.mkdir(parents=True)
+                legacy.touch()
+                self.assertEqual(default_data_dir(),legacy.parent)
+                with patch.dict(os.environ,{'APP_DATA_DIR':str(root/'chosen')}):
+                    self.assertEqual(default_data_dir(),root/'chosen')
+            self.assertEqual(database_path(legacy.parent),legacy)
+            (legacy.parent/DATABASE_NAME).touch()
+            with self.assertRaises(ValueError):database_path(legacy.parent)
+
+    def test_remote_locations_are_configurable_and_reject_unsafe_paths(self):
+        with patch.dict(os.environ,{},clear=True):
+            self.assertEqual(deployment_location(),('apps/dpt-syncer','dpt-syncer'))
+            with patch.dict(os.environ,{'DPT_REMOTE_ROOT':'apps/reader-archive','DPT_DEPLOY_PROJECT':'reader-archive'}):
+                self.assertEqual(deployment_location(),('apps/reader-archive','reader-archive'))
+            for root in ['/tmp/app','../app','apps/../app','apps/./app','apps//app','apps/app/','apps/a;command','apps/$(id)']:
+                with self.subTest(root=root),patch.dict(os.environ,{'DPT_REMOTE_ROOT':root}):
+                    with self.assertRaises(ValueError):deployment_location()
+            for project in ['-p','app name','app;command','Uppercase']:
+                with self.subTest(project=project),patch.dict(os.environ,{'DPT_DEPLOY_PROJECT':project}):
+                    with self.assertRaises(ValueError):deployment_location()
+
+    def test_deployment_uses_same_custom_location_and_project_at_every_step(self):
+        import scripts.deploy as deployment
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'scripts').mkdir()
+            (root/'scripts/install_remote.sh').write_text('example installer')
+            with patch.object(deployment,'ROOT',root),patch.dict(os.environ,{'DPT_REMOTE_ROOT':'apps/reader-archive','DPT_DEPLOY_PROJECT':'reader-archive'},clear=True),patch.object(deployment.subprocess,'run') as run,patch.object(deployment.subprocess,'check_output',return_value=b'http://192.0.2.10:4387\n'),contextlib.redirect_stdout(io.StringIO()):
+                deploy('user@server.example')
+            commands=[call.args[0] for call in run.call_args_list]
+            self.assertIn('apps/reader-archive/incoming',commands[1][-1])
+            self.assertEqual(commands[2][-1],'user@server.example:apps/reader-archive/incoming/')
+            self.assertEqual(commands[3],['ssh','user@server.example','bash -s -- apps/reader-archive reader-archive'])
+            self.assertEqual((root/'output/deploy/service-url.txt').read_text(),'http://192.0.2.10:4387\n')
+
     def test_remote_network_settings_use_options_or_existing_private_configuration(self):
-        script=Path('scripts/install_study_remote.sh').read_text()
+        script=Path('scripts/install_remote.sh').read_text()
         code=script.split('APP_LISTEN_ADDRESS="$(python3 - <<\'PY\'\n',1)[1].split('\nPY\n)"',1)[0]
         cases=[
             ({'APP_LISTEN_ADDRESS':'192.0.2.10','DPT_ADDRESS':'reader.example','APP_ALLOWED_HOSTS':'notes.example'},{},{}),
@@ -691,7 +1041,7 @@ class ModelTests(unittest.TestCase):
     def test_source_packages_exclude_runtime_files_and_external_symlinks(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);app=root/'app';app.mkdir()
-            for name in ['service.py','requirements.txt','settings.json','privatekey.dat','notes.pdf','study.sqlite3']:
+            for name in ['service.py','requirements.txt','settings.json','privatekey.dat','notes.pdf','notes.sqlite3']:
                 (app/name).write_text('example')
             external=root/'external.txt';external.write_text('not-source')
             (app/'link.py').symlink_to(external)
@@ -771,7 +1121,7 @@ class ModelTests(unittest.TestCase):
             with self.assertRaises(ValueError): normalize_folders([value])
         with self.assertRaises(ValueError): normalize_folders('Document/A')
     def test_source_extracted_with_private_umask_remains_readable_to_runtime_user(self):
-        from scripts.package_study import build_source_archive
+        from scripts.package import build_source_archive
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)/'project'
             source=root/'app'/'__init__.py'

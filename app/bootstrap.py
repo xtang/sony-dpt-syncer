@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .service import ROOT, Service
+from .service import Service
+from .paths import ROOT, default_data_dir
+from .env import load_env
 
 
 def relocate(data):
@@ -20,8 +22,9 @@ def relocate(data):
 
 
 if __name__ == "__main__":
+    load_env(ROOT/".env")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=Path, default=ROOT/"output/study")
+    parser.add_argument("--data", type=Path, default=default_data_dir())
     parser.add_argument("--relocate", action="store_true")
     args = parser.parse_args()
     relocate(args.data)

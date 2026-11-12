@@ -14,14 +14,19 @@ from pathlib import Path
 
 from .device import DeviceClient, validate_address
 from .llm import ModelClient, validate_model_url
-from .pdf_notes import digest, ingest_pdf
+from .pdf_notes import digest, ingest_pdf, render_page_context
 from .store import Store, encode, now
 from .scope import folder_path, in_folders, normalize_folders
+from .paths import ROOT, database_path
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = dict(device_address="", sync_clock=True, auto_sync=True,
                 sync_interval=180, auto_analyze=True, model_base_url="", model_name="",
                 model_api_key="", upload_folder="Document/收件箱", sync_folders=[], last_sync=None)
+ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor")
+
+
+def analysis_version(note):
+    return digest([note[key] for key in ANALYSIS_FIELDS])
 
 
 def document_id(remote):
@@ -47,7 +52,7 @@ class Service:
             previous = json.loads(self.config_path.read_text())
             self.config.update(previous)
         self.config["sync_folders"] = normalize_folders(self.config["sync_folders"])
-        self.store = Store(self.data/"study.sqlite3")
+        self.store = Store(database_path(self.data))
         self.device = DeviceClient(self.settings, auth_dir, relay)
         self.model = ModelClient(self.settings)
         self.tasks = queue.Queue()
@@ -210,9 +215,9 @@ class Service:
         return {"queued": True, "job_id": job}
 
     def start(self):
-        threading.Thread(target=self._worker, args=(self.tasks,), daemon=True, name="study-device").start()
-        threading.Thread(target=self._worker, args=(self.model_tasks,), daemon=True, name="study-model").start()
-        threading.Thread(target=self._scheduler, daemon=True, name="study-sync").start()
+        threading.Thread(target=self._worker, args=(self.tasks,), daemon=True, name="dpt-device").start()
+        threading.Thread(target=self._worker, args=(self.model_tasks,), daemon=True, name="dpt-model").start()
+        threading.Thread(target=self._scheduler, daemon=True, name="dpt-sync").start()
 
     def _scheduler(self):
         # Wait before the first poll so settings and imported notes are available immediately.
@@ -447,12 +452,26 @@ class Service:
         note = self.store.note(identifier)
         if not note:
             raise ValueError("笔记不存在")
+        if note["ignored"]:
+            raise ValueError("请先恢复这条笔记，再校正或解读")
         fields = {key: str(values[key])[:8000] for key in ("transcript", "question", "anchor", "title") if key in values}
         if not fields:
             raise ValueError("没有可保存的内容")
         with self.note_lock:
             self.store.execute("UPDATE notes SET "+",".join(key+"=?" for key in fields)+
-                               ",manual_transcript=1,status='recognized',confidence=1,error='',unread=0 WHERE id=?", (*fields.values(), identifier))
+                               ",manual_transcript=1,status='recognized',confidence=1,error='',unread=0,activity_at=? WHERE id=?", (*fields.values(), now(), identifier))
+        return self.store.note(identifier)
+
+    def ignore_note(self, identifier, ignored):
+        if not isinstance(ignored, bool):
+            raise ValueError("请选择是否忽略笔记")
+        with self.note_lock:
+            note = self.store.note(identifier)
+            if not note or note["archived"]:
+                raise ValueError("笔记已移除或不存在")
+            if bool(note["ignored"]) != ignored:
+                self.store.execute("UPDATE notes SET ignored=?,ignore_version=ignore_version+1,unread=0 WHERE id=?", (int(ignored),identifier))
+                self.store.event("ignore" if ignored else "restore", "已忽略一条笔记" if ignored else "已恢复一条笔记", identifier)
         return self.store.note(identifier)
 
     def analyze(self, identifier):
@@ -460,16 +479,28 @@ class Service:
             note = self.store.note(identifier)
             if not note or note["archived"]:
                 raise ValueError("笔记已移除或不存在")
+            if note["ignored"]:
+                return {"message": "笔记已忽略，已跳过解读"}
             if not self.document_active(note["document_id"]):
                 return {"message": "文档不在当前同步范围，已跳过解读"}
-        start_hash = digest([note["content_hash"], note["transcript"], note["question"], note["anchor"]])
+        start_hash = analysis_version(note)
         recognition = None
         try:
+            snapshot = self.store.one("SELECT sha256,pdf_path FROM snapshots WHERE id=? AND document_id=?", (note["snapshot_id"], note["document_id"]))
+            if not snapshot:
+                raise ValueError("缺少笔记对应的 PDF 版本，请重新同步文档")
+            page_image = render_page_context(snapshot["pdf_path"], note["page"],
+                self.data/"page-context"/(snapshot["sha256"]+f"-p{note['page']}.jpg"))
+            note["page_image_path"] = str(page_image)
+            with self.note_lock:
+                current = self.store.note(identifier)
+                if current["archived"] or current["ignored"] or not self.document_active(note["document_id"]) or analysis_version(current)!=start_hash:
+                    return {"message": "笔记或同步范围已更新，已跳过解读"}
             if not note["manual_transcript"] and note["status"] not in ("recognized", "answered"):
                 recognition = self.model.recognize(note)
                 with self.note_lock:
                     current = self.store.note(identifier)
-                    if current["archived"] or not self.document_active(current["document_id"]) or digest([current["content_hash"], current["transcript"], current["question"], current["anchor"]]) != start_hash:
+                    if current["archived"] or current["ignored"] or not self.document_active(current["document_id"]) or analysis_version(current) != start_hash:
                         return {"message": "笔记已更新，本次识别结果已丢弃，请重新解读"}
                     status = "recognized" if recognition["confidence"] >= .85 else "needs_review"
                     self.store.execute("""UPDATE notes SET transcript=?,question=?,anchor=?,title=?,kind=?,
@@ -477,6 +508,7 @@ class Service:
                         recognition["anchor"], recognition["title"] or "手写笔记", recognition["kind"], recognition["confidence"],
                         encode(recognition["tags"]), status, identifier))
                     note = self.store.note(identifier)
+                    note["page_image_path"] = str(page_image)
                 if status == "needs_review":
                     return {"message": "笔迹不够确定，请在笔记里核对转写后再解读", "needs_review": True}
             elif note["status"] == "needs_review" and not note["manual_transcript"]:
@@ -484,7 +516,7 @@ class Service:
             if not (note["question"].strip() or note["transcript"].strip() or note["anchor"].strip()):
                 self.store.execute("UPDATE notes SET status='needs_review',error='请补充希望解读的问题' WHERE id=?", (identifier,))
                 return {"message": "请补充希望解读的问题", "needs_review": True}
-            before_answer = digest([note["content_hash"], note["transcript"], note["question"], note["anchor"]])
+            before_answer = analysis_version(note)
             candidates = []
             for item in self.store.notes(status="answered"):
                 if item["id"] == identifier or not item["answer"] or not self.in_scope(item["remote_path"]) or not self.store.document(item["document_id"])["device_present"]:
@@ -496,20 +528,21 @@ class Service:
                     candidates.append((score, item))
             related = [dict(title=item["title"], question=item["question"], summary=item["answer"]["summary"][:1200])
                        for _, item in sorted(candidates, key=lambda pair: -pair[0])[:4]]
-            if not self.document_active(note["document_id"]):
-                return {"message": "同步范围已变更，已跳过解读"}
+            with self.note_lock:
+                current = self.store.note(identifier)
+                if current["archived"] or current["ignored"] or not self.document_active(note["document_id"]) or analysis_version(current)!=before_answer:
+                    return {"message": "笔记或同步范围已更新，已跳过解读"}
             answer = self.model.answer(note, related)
             with self.note_lock:
                 current = self.store.note(identifier)
-                if current["archived"] or not self.document_active(current["document_id"]) or digest([current["content_hash"], current["transcript"], current["question"], current["anchor"]]) != before_answer:
+                if current["archived"] or current["ignored"] or not self.document_active(current["document_id"]) or analysis_version(current) != before_answer:
                     return {"message": "笔记已更新，本次解读已丢弃，请重新解读"}
                 self.store.save_answer(identifier, answer, self.settings()["model_name"])
             return {"message": "解读完成，已加入知识库", "note_id": identifier}
         except Exception as error:
             with self.note_lock:
                 current = self.store.note(identifier)
-                fields = ("content_hash", "transcript", "question", "anchor")
-                if current and not current["archived"] and self.document_active(current["document_id"]) and all(current[key] == note[key] for key in fields):
+                if current and not current["archived"] and not current["ignored"] and self.document_active(current["document_id"]) and analysis_version(current)==analysis_version(note):
                     self.store.execute("UPDATE notes SET status='error',error=? WHERE id=?", (self.safe_error(error), identifier))
             raise
 
@@ -582,7 +615,7 @@ class Service:
                     limitation="回顾仅统计可信的批注修改记录，不推断阅读时长、任务完成或知识掌握程度。异常日期的历史笔记不归入本期。")
 
     def export(self):
-        return dict(exported_at=now(), notes=self.store.notes(), report=self.report())
+        return dict(exported_at=now(), notes=self.store.notes(include_ignored=True), report=self.report())
 
     def state(self):
         return dict(stats=self.store.stats(), settings=self.public_settings(), online=self.online,

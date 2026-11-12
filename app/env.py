@@ -5,6 +5,7 @@ import shlex
 from pathlib import Path
 
 ENV_KEYS = frozenset({"DPT_DEPLOY_HOST", "DPT_ADDRESS", "DPT_WEB_URL", "DPT_AUTH_DIR",
+    "DPT_REMOTE_ROOT", "DPT_DEPLOY_PROJECT",
     "APP_DATA_DIR", "APP_BIND", "APP_PORT", "APP_LISTEN_ADDRESS", "APP_ALLOWED_HOSTS"})
 
 

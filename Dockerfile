@@ -2,13 +2,13 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /opt/n2-study
-COPY app/requirements.txt /opt/n2-study/app/requirements.txt
+WORKDIR /opt/dpt-syncer
+COPY app/requirements.txt /opt/dpt-syncer/app/requirements.txt
 RUN pip install -r app/requirements.txt
-COPY app /opt/n2-study/app
+COPY app /opt/dpt-syncer/app
 # COPY preserves restrictive permissions from a private SSH extraction directory.
 # Application source is public inside the image; the private /data mount is separate.
-RUN chmod -R a+rX /opt/n2-study
+RUN chmod -R a+rX /opt/dpt-syncer
 USER 65534:65534
 # Fail the image build here if an ordinary runtime user cannot import/read the app.
 RUN python -c "import app.server, app.device_clock; from pathlib import Path; [p.read_bytes() for p in Path('app/static').iterdir() if p.is_file()]"

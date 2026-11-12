@@ -1,14 +1,16 @@
 services:
-  study:
+  syncer:
     build: .
-    image: n2-study:${RELEASE_ID:-local}
+    image: dpt-syncer:${RELEASE_ID:-local}
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     restart: unless-stopped
     init: true
     ports:
       - "${APP_LISTEN_ADDRESS:-127.0.0.1}:4387:4387"
     volumes:
-      - ${STUDY_DATA_DIR:-./output/study}:/data
+      - type: bind
+        source: ${APP_DATA_DIR:-./output/data}
+        target: /data
     environment:
       APP_DATA_DIR: /data
       DPT_AUTH_DIR: /data/auth
