@@ -65,6 +65,20 @@ def fixture_pdf(path, position=120, include=True, date=None, rotation=0, extra_n
         writer.write(file)
 
 
+def grouped_fixture(path, positions):
+    writer=PdfWriter()
+    page=writer.add_blank_page(width=595,height=842)
+    refs=ArrayObject()
+    for identifier,y in positions:
+        annotation=DictionaryObject({NameObject('/Type'):NameObject('/Annot'),NameObject('/Subtype'):NameObject('/Ink'),
+            NameObject('/NM'):TextStringObject(identifier),
+            NameObject('/Rect'):ArrayObject([FloatObject(v) for v in (100,y,112,y+12)]),
+            NameObject('/InkList'):ArrayObject([ArrayObject([FloatObject(v) for v in (100,y,112,y+12)])])})
+        refs.append(writer._add_object(annotation))
+    page[NameObject('/Annots')]=refs
+    writer.write(path)
+
+
 class FakePaper:
     """A device with stable document IDs and metadata-only native moves."""
     def __init__(self, entries, payload):
@@ -212,18 +226,129 @@ class SyncerCase(unittest.TestCase):
         self.assertEqual(self.service.store.note(noteid)['answer']['summary'],'saved')
         self.assertEqual(self.service.store.one('SELECT count(*) AS n FROM snapshots')['n'],1)
 
-    def test_changed_handwriting_invalidates_transcription_but_retains_history(self):
+    def test_changed_handwriting_requires_reconfirmation_and_retains_history(self):
         identifier = self.ingest()['notes'][0]
         self.service.edit_note(identifier, {'transcript':'previous writing','question':'previous question'})
         self.service.store.save_answer(identifier, {'summary':'old','explanation':'old'}, 'test')
         fixture_pdf(self.pdf, position=145)
         self.assertEqual(self.ingest()['notes'],[identifier])
         note = self.service.store.note(identifier)
-        self.assertFalse(note['manual_transcript'])
-        self.assertEqual(note['transcript'],'')
-        self.assertEqual(note['status'],'pending')
+        self.assertTrue(note['manual_transcript'])
+        self.assertTrue(note['confirmation_stale'])
+        self.assertEqual(note['transcript'],'previous writing')
+        self.assertEqual(note['status'],'needs_review')
         self.assertEqual(len(note['history']),1)
         self.assertEqual(note['answer']['summary'],'old')
+
+    def test_added_stroke_keeps_identity_and_ignore_state(self):
+        grouped_fixture(self.pdf, [('a',100)])
+        identifier=self.ingest()['notes'][0]
+        before=self.service.store.note(identifier)
+        self.service.ignore_note(identifier,True)
+        grouped_fixture(self.pdf, [('b',120),('a',100)])
+        self.assertEqual(self.ingest()['notes'],[identifier])
+        after=self.service.store.note(identifier)
+        self.assertEqual(after['group_key'],before['group_key'])
+        self.assertEqual(after['annotation_ids'],['a','b'])
+        self.assertTrue(after['ignored'])
+        self.assertEqual(after['revisions'][0]['note']['annotation_ids'],['a'])
+        self.assertEqual(self.ingest()['notes'],[])
+        self.assertEqual(len(self.service.store.note(identifier)['revisions']),1)
+
+    def test_split_largest_fragment_keeps_identity_and_confirmed_text(self):
+        grouped_fixture(self.pdf,[('a',100),('b',120),('c',140),('d',160)])
+        identifier=self.ingest()['notes'][0]
+        self.service.edit_note(identifier,dict(transcript='confirmed text',question='original question'))
+        self.service.store.save_answer(identifier,dict(summary='old reply',explanation='details'),'test')
+        grouped_fixture(self.pdf,[('a',100),('d',340),('b',300),('c',320)])
+        self.ingest()
+        retained=self.service.store.note(identifier)
+        self.assertEqual(retained['annotation_ids'],['b','c','d'])
+        self.assertEqual(retained['transcript'],'confirmed text')
+        self.assertTrue(retained['confirmation_stale'])
+        self.assertEqual(retained['answer']['summary'],'old reply')
+        fragment=next(n for n in self.service.store.notes() if n['id']!=identifier)
+        self.assertEqual(fragment['annotation_ids'],['a'])
+        self.assertTrue(fragment['confirmation_stale'])
+        self.assertEqual(fragment['transcript'],'')
+        links=self.service.store.note(fragment['id'])['lineage']
+        self.assertEqual((links[0]['parent_id'],links[0]['child_id'],links[0]['relation']),(identifier,fragment['id'],'split'))
+        self.assertEqual(self.ingest()['notes'],[])
+        self.service.model=Mock()
+        self.assertTrue(self.service.analyze(identifier)['needs_review'])
+        self.service.model.recognize.assert_not_called()
+        self.service.model.answer.assert_not_called()
+        self.service.edit_note(identifier,dict(transcript='confirmed new text'))
+        self.service.model.answer.return_value=dict(summary='new reply',explanation='new details')
+        self.service.analyze(identifier)
+        current=self.service.store.note(identifier)
+        self.assertFalse(current['confirmation_stale'])
+        self.assertEqual(len(current['history']),2)
+        self.assertEqual(current['revisions'][0]['note']['transcript'],'confirmed text')
+        self.assertEqual(current['revisions'][0]['reason'],'manual_edit')
+
+    def test_merge_keeps_largest_parent_and_archives_other_history(self):
+        grouped_fixture(self.pdf,[('a',100),('b',120),('c',300)])
+        self.ingest()
+        first=next(n for n in self.service.store.notes() if 'a' in n['annotation_ids'])['id']
+        second=next(n for n in self.service.store.notes() if 'c' in n['annotation_ids'])['id']
+        self.service.edit_note(second,dict(transcript='other confirmed text'))
+        self.service.store.save_answer(second,dict(summary='other old answer',explanation='details'),'test')
+        grouped_fixture(self.pdf,[('c',300),('a',100),('b',120),('d',150),('e',180),('f',210),('g',240),('h',270)])
+        self.assertEqual(self.ingest()['notes'],[first])
+        winner=self.service.store.note(first);archived=self.service.store.note(second)
+        self.assertFalse(winner['archived'])
+        self.assertTrue(winner['confirmation_stale'])
+        self.assertTrue(archived['archived'])
+        self.assertEqual(archived['transcript'],'other confirmed text')
+        self.assertEqual(archived['answer']['summary'],'other old answer')
+        self.assertEqual(winner['lineage'][0]['relation'],'merge')
+        self.assertEqual(winner['lineage'][0]['parent_id'],second)
+        self.assertEqual(archived['revisions'][0]['reason'],'archived')
+        self.assertEqual(self.ingest()['notes'],[])
+        self.assertEqual(len(self.service.store.note(first)['lineage']),1)
+
+    def test_failed_split_rolls_back_identity_revisions_and_snapshot(self):
+        from app.pdf_notes import crop_group
+        grouped_fixture(self.pdf,[('a',100),('b',120)])
+        identifier=self.ingest()['notes'][0]
+        before=self.service.store.note(identifier)
+        grouped_fixture(self.pdf,[('a',100),('b',300)])
+        calls=0
+        def fail_second(*args,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==2: raise RuntimeError('renderer failed')
+            return crop_group(*args,**kwargs)
+        with patch('app.pdf_notes.crop_group',side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError,'renderer failed'): self.ingest()
+        self.assertEqual(self.service.store.note(identifier),before)
+        self.assertEqual(self.service.store.document(self.docid)['snapshot_id'],before['snapshot_id'])
+        self.assertEqual(len(self.service.store.notes()),1)
+        self.assertEqual(self.service.store.query('SELECT * FROM note_links'),[])
+        self.ingest()
+        self.assertEqual(len(self.service.store.notes()),2)
+
+    def test_restore_exact_archived_group_keeps_identity(self):
+        grouped_fixture(self.pdf,[('a',100)])
+        identifier=self.ingest()['notes'][0]
+        grouped_fixture(self.pdf,[])
+        self.ingest()
+        self.assertTrue(self.service.store.note(identifier)['archived'])
+        grouped_fixture(self.pdf,[('a',100)])
+        self.ingest()
+        self.assertFalse(self.service.store.note(identifier)['archived'])
+        self.assertEqual(len(self.service.store.notes()),1)
+
+    def test_ignored_split_fragments_stay_ignored(self):
+        grouped_fixture(self.pdf,[('a',100),('b',120)])
+        identifier=self.ingest()['notes'][0]
+        self.service.ignore_note(identifier,True)
+        grouped_fixture(self.pdf,[('a',100),('b',300)])
+        self.ingest()
+        notes=self.service.store.notes(include_ignored=True)
+        self.assertEqual(len(notes),2)
+        self.assertTrue(all(n['ignored'] for n in notes))
 
     def test_deleted_annotation_archives_instead_of_deleting(self):
         identifier = self.ingest()['notes'][0]
@@ -1028,6 +1153,21 @@ class SyncerCase(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_group_matching_is_one_to_one_and_independent_of_input_order(self):
+        from app.pdf_notes import match_note_groups
+        def old(identifier,ids,archived=0):
+            return dict(id=identifier,page=1,annotation_ids=json.dumps(ids),archived=archived,last_seen='2026-11-13')
+        def group(*ids): return [dict(id=i,page=1) for i in ids]
+        existing=[old(1,['a','b','c','d']),old(2,['e']),old(3,['a'],1)]
+        groups=[group('a'),group('b','c','d'),group('e')]
+        for rows in (existing,list(reversed(existing))):
+            for incoming in (groups,list(reversed(groups))):
+                result=match_note_groups(incoming,rows)
+                mapping={tuple(sorted(a['id'] for a in incoming[i])):n['id'] for i,n in result.items()}
+                self.assertEqual(mapping,{('b','c','d'):1,('e',):2})
+        ties=[old(2,['a']),old(1,['b'])]
+        self.assertEqual(match_note_groups([group('a','b')],ties)[0]['id'],1)
+
     def test_existing_note_database_migration_keeps_saved_replies_and_read_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/'existing.sqlite3'

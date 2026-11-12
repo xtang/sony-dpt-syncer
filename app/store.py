@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -51,6 +52,16 @@ CREATE TABLE IF NOT EXISTS answers (
  payload TEXT NOT NULL, model TEXT NOT NULL, provenance TEXT NOT NULL,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS note_revisions (
+ id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL REFERENCES notes(id),
+ reason TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS revisions_note ON note_revisions(note_id,id);
+CREATE TABLE IF NOT EXISTS note_links (
+ parent_id INTEGER NOT NULL REFERENCES notes(id), child_id INTEGER NOT NULL REFERENCES notes(id),
+ relation TEXT NOT NULL, snapshot_id INTEGER NOT NULL REFERENCES snapshots(id), created_at TEXT NOT NULL,
+ UNIQUE(parent_id,child_id,relation,snapshot_id)
+);
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
  message TEXT DEFAULT '', progress INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
@@ -71,6 +82,7 @@ CREATE TABLE IF NOT EXISTS folders (
 
 class Store:
     def __init__(self, path: Path):
+        self._transactions = threading.local()
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
@@ -89,7 +101,8 @@ class Store:
                                       ("question_refs", "TEXT NOT NULL DEFAULT '[]'"),
                                       ("scope_status", "TEXT NOT NULL DEFAULT 'unknown'"),
                                       ("scope_version", "INTEGER NOT NULL DEFAULT 0"),
-                                      ("scope_conflicts", "TEXT NOT NULL DEFAULT '[]'")):
+                                      ("scope_conflicts", "TEXT NOT NULL DEFAULT '[]'"),
+                                      ("confirmation_stale", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE notes ADD COLUMN {name} {declaration}")
             db.execute("UPDATE notes SET activity_at=COALESCE((SELECT created_at FROM answers WHERE id=notes.answer_id),first_seen) WHERE activity_at IS NULL")
@@ -97,6 +110,10 @@ class Store:
 
     @contextmanager
     def db(self):
+        active = getattr(self._transactions, "connection", None)
+        if active is not None:
+            yield active
+            return
         db = sqlite3.connect(self.path, timeout=15)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -106,6 +123,20 @@ class Store:
                 yield db
         finally:
             db.close()
+
+    @contextmanager
+    def transaction(self):
+        """Keep note reassignment, revisions and archival atomic for one ingestion."""
+        if getattr(self._transactions, "connection", None) is not None:
+            yield
+            return
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._transactions.connection = db
+            try:
+                yield
+            finally:
+                self._transactions.connection = None
 
     def query(self, sql, values=()):
         with self.db() as db:
@@ -227,7 +258,28 @@ class Store:
             return None
         result = self.decode_note(row)
         result["history"] = self.query("SELECT id,model,provenance,created_at FROM answers WHERE note_id=? ORDER BY id DESC", (identifier,))
+        result["revisions"] = self.query("SELECT id,reason,payload,created_at FROM note_revisions WHERE note_id=? ORDER BY id DESC", (identifier,))
+        for revision in result["revisions"]:
+            revision["note"] = json.loads(revision.pop("payload"))
+        result["lineage"] = self.query("""SELECT l.parent_id,l.child_id,l.relation,l.snapshot_id,
+            n.id,n.title,n.archived,n.transcript,n.question,n.anchor,a.payload AS answer_payload
+            FROM note_links l JOIN notes n
+            ON n.id=CASE WHEN l.parent_id=? THEN l.child_id ELSE l.parent_id END
+            LEFT JOIN answers a ON a.id=n.answer_id
+            WHERE l.parent_id=? OR l.child_id=? ORDER BY l.snapshot_id DESC,n.id""", (identifier,identifier,identifier))
+        for related in result["lineage"]:
+            related["answer"] = json.loads(related.pop("answer_payload") or "null")
         return result
+
+    def capture_revision(self, note, reason):
+        fields = ("title", "transcript", "question", "anchor", "manual_transcript", "confirmation_stale",
+                  "kind", "question_refs", "annotation_ids", "content_hash", "snapshot_id", "answer_id", "ignored")
+        payload = {key: note.get(key) for key in fields}
+        for key in ("question_refs", "annotation_ids"):
+            if isinstance(payload[key], str):
+                payload[key] = json.loads(payload[key])
+        return self.execute("INSERT INTO note_revisions(note_id,reason,payload,created_at) VALUES(?,?,?,?)",
+                            (note["id"], reason, encode(payload), now()))
 
     def save_answer(self, note_id, answer, model, provenance="model"):
         with self.db() as db:

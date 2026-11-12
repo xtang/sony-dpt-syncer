@@ -47,6 +47,15 @@ assert(!detail.includes('<img src=x'));
 for (const text of ['detail-bar','ink-panel','answer-panel','ink-frame','id="transcript-area"','data-action="edit-note"','打开 PDF 第 11 页','data-ignore-note="8" data-ignored="true"','忽略这条笔记','系统设计文档','P11','data-action="prev-note"','data-action="next-note"','data-action="back-to-list"','data-action="zoom-ink"','转写已人工核对','data-action="analyze"']) assert(detail.includes(text),text);
 assert(!detail.includes('data-action="mark-read"'),'read notes do not offer mark-read');
 assert(!detail.includes('class="badge'),'answered notes carry no status badge');
+context.changedNote={...context.fixtureNote,confirmation_stale:1,status:'needs_review',revisions:[{id:1,reason:'handwriting_changed',created_at:'2026-11-13T01:00:00Z',note:{title:'旧标题',transcript:'<img src=x onerror=bad()>旧文字'}}],lineage:[{id:9,title:'旧笔记',archived:1,relation:'merge',transcript:'合并前的文字',answer:{summary:'旧解答摘要',explanation:'旧解释'}}]};
+run('renderDetail(changedNote)');
+assert(detailHTML().includes('笔迹已变更，需要重新确认'));
+assert(!detailHTML().includes('转写已人工核对'));
+assert(detailHTML().includes('笔记修订与关联记录'));
+assert(detailHTML().includes('合并前的文字'));
+assert(detailHTML().includes('旧解答摘要'));
+assert(detailHTML().includes('&lt;img src=x onerror=bad()&gt;旧文字'));
+assert(!detailHTML().includes('<img src=x'));
 context.genericAnswer={summary:'说明',explanation:'正文',examples:[{text:'采用指数退避重试',explanation:'避免请求集中发送'}]};
 assert(run('answerHTML(genericAnswer,"model","vision",false)').includes('采用指数退避重试'));
 context.exerciseAnswer={summary:'需要订正',explanation:'见解析',exercise_reviews:[

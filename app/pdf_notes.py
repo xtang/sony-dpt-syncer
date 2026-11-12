@@ -6,6 +6,7 @@ import math
 import re
 import subprocess
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -222,7 +223,52 @@ def render_note_images(pdf, note, data_dir, snapshot_sha):
             full.write_bytes(temporary.read_bytes())
     return {"model_preview_path": str(crop), "page_image_path": str(full)}
 
+
+def match_note_groups(groups, existing):
+    """Deterministic one-to-one matching, largest shared annotation set first.
+
+    Only active notes compete for overlap. Archived notes can return on an exact
+    match after erasure/undo, but cannot steal strokes from an active identity.
+    """
+    keys = [tuple(sorted(a["id"] for a in group)) for group in groups]
+    sets = [set(key) for key in keys]
+    candidates = []
+    for old in existing:
+        if old["archived"]:
+            continue
+        old_ids = set(json.loads(old["annotation_ids"]))
+        for index, group in enumerate(groups):
+            shared = len(old_ids & sets[index])
+            if old["page"] == group[0]["page"] and shared:
+                similarity = shared/len(old_ids | sets[index])
+                candidates.append((-shared, -similarity, old["id"], keys[index], index, old))
+    matches, used = {}, set()
+    for _, _, identifier, _, index, old in sorted(candidates, key=lambda item: item[:4]):
+        if index not in matches and identifier not in used:
+            matches[index] = old
+            used.add(identifier)
+    for index, group in sorted(enumerate(groups), key=lambda item: keys[item[0]]):
+        if index in matches:
+            continue
+        # A split fragment must not resurrect an archived predecessor of its parent.
+        if any(not old["archived"] and old["page"] == group[0]["page"] and
+               sets[index] & set(json.loads(old["annotation_ids"])) for old in existing):
+            continue
+        exact = [old for old in existing if old["archived"] and old["id"] not in used and
+                 old["page"] == group[0]["page"] and set(json.loads(old["annotation_ids"])) == sets[index]]
+        if exact:
+            old = max(exact, key=lambda item: (item["last_seen"], item["id"]))
+            matches[index] = old
+            used.add(old["id"])
+    return matches
+
+
 def ingest_pdf(store, data_dir, document_id, path, metadata=None):
+    with store.transaction():
+        return _ingest_pdf(store, data_dir, document_id, path, metadata)
+
+
+def _ingest_pdf(store, data_dir, document_id, path, metadata=None):
     data_dir, path = Path(data_dir), Path(path)
     binary = path.read_bytes()
     sha = hashlib.sha256(binary).hexdigest()
@@ -242,14 +288,19 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
             VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET page=excluded.page,
             fingerprint=excluded.fingerprint,payload=excluded.payload,last_seen=excluded.last_seen,removed=0""",
                       (identifier, document_id, item["page"], item["fingerprint"], encode(item), now(), now()))
-    active, changed_notes = [], []
-    for group in group_annotations(annotations):
+    groups = group_annotations(annotations)
+    existing = store.query("SELECT * FROM notes WHERE document_id=?", (document_id,))
+    matches = match_note_groups(groups, existing)
+    active, changed_notes, assignments = [], [], {}
+    for index, group in enumerate(groups):
         identifiers = sorted(item["id"] for item in group)
-        group_key = digest([document_id, group[0]["page"], identifiers])
+        old = matches.get(index)
+        group_key = old["group_key"] if old else uuid.uuid4().hex
         content_hash = digest(sorted(item["fingerprint"] for item in group))
-        old = store.one("SELECT * FROM notes WHERE group_key=?", (group_key,))
         active.append(group_key)
-        if old and old["content_hash"] == content_hash:
+        if old:
+            assignments[index] = old["id"]
+        if old and old["content_hash"] == content_hash and json.loads(old["annotation_ids"]) == identifiers:
             store.execute("UPDATE notes SET last_seen=?,archived=0,snapshot_id=? WHERE id=?", (now(), snapshot, old["id"]))
             continue
         preview = data_dir/"previews"/(group_key[:20]+"-"+content_hash[:12]+".png")
@@ -261,10 +312,15 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
                       source_text=page_texts[group[0]["page"]], device_created=created,
                       device_modified=modified, time_trusted=int(reliable), last_seen=now())
         if old:
+            store.capture_revision(old, "handwriting_changed")
+            stale = int(bool(old["manual_transcript"] or old["confirmation_stale"]))
             store.execute("""UPDATE notes SET snapshot_id=?,content_hash=?,preview_path=?,source_text=?,
-                device_created=?,device_modified=?,time_trusted=?,last_seen=?,status='pending',
-                confidence=NULL,manual_transcript=0,archived=0,error='',unread=0,question_refs='[]',scope_status='unknown',scope_version=0,scope_conflicts='[]',activity_at=? WHERE id=?""", (*values.values(), now(), old["id"]))
-            store.execute("UPDATE notes SET transcript=?,question='',anchor='' WHERE id=?", (text, old["id"]))
+                device_created=?,device_modified=?,time_trusted=?,last_seen=?,status=?,
+                confidence=NULL,confirmation_stale=?,annotation_ids=?,archived=0,error='',unread=0,
+                question_refs='[]',scope_status='unknown',scope_version=0,scope_conflicts='[]',activity_at=? WHERE id=?""",
+                (*values.values(), "needs_review" if stale else "pending", stale, encode(identifiers), now(), old["id"]))
+            if not old["manual_transcript"]:
+                store.execute("UPDATE notes SET transcript=?,question='',anchor='',manual_transcript=0 WHERE id=?", (text, old["id"]))
             changed_notes.append(old["id"])
         else:
             identifier = store.execute("""INSERT INTO notes(document_id,page,group_key,content_hash,
@@ -273,9 +329,27 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
                 (document_id, group[0]["page"], group_key, content_hash, encode(identifiers), snapshot,
                  str(preview), page_texts[group[0]["page"]], title, text, created, modified,
                  int(reliable), now(), now()))
+            assignments[index] = identifier
+            parents = [item for item in existing if not item["archived"] and item["page"] == group[0]["page"] and
+                       set(identifiers) & set(json.loads(item["annotation_ids"]))]
+            inherited_ignore = int(bool(parents) and all(item["ignored"] for item in parents))
+            needs_confirmation = int(any(item["manual_transcript"] or item["confirmation_stale"] for item in parents))
             changed_notes.append(identifier)
-            store.execute("UPDATE notes SET activity_at=first_seen WHERE id=?", (identifier,))
-    for old in store.query("SELECT id,group_key FROM notes WHERE document_id=? AND archived=0", (document_id,)):
+            store.execute("UPDATE notes SET activity_at=first_seen,ignored=?,confirmation_stale=?,status=? WHERE id=?",
+                          (inherited_ignore, needs_confirmation, "needs_review" if needs_confirmation else "pending", identifier))
+    retained = set(assignments.values())
+    for index, group in enumerate(groups):
+        ids = {item["id"] for item in group}
+        contributors = [old for old in existing if not old["archived"] and old["page"] == group[0]["page"] and
+                        ids & set(json.loads(old["annotation_ids"])) and old["id"] != assignments[index]]
+        for old in contributors:
+            relation = "split" if old["id"] in retained else "merge"
+            store.execute("INSERT OR IGNORE INTO note_links(parent_id,child_id,relation,snapshot_id,created_at) VALUES(?,?,?,?,?)",
+                          (old["id"], assignments[index], relation, snapshot, now()))
+            if old["manual_transcript"] or old["confirmation_stale"]:
+                store.execute("UPDATE notes SET confirmation_stale=1,status='needs_review' WHERE id=?", (assignments[index],))
+    for old in store.query("SELECT * FROM notes WHERE document_id=? AND archived=0", (document_id,)):
         if old["group_key"] not in active:
+            store.capture_revision(old, "archived")
             store.execute("UPDATE notes SET archived=1 WHERE id=?", (old["id"],))
     return {"notes": changed_notes, "annotations": len(annotations), "groups": len(active), "snapshot_id": snapshot, "sha256": sha}

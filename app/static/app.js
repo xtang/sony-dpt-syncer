@@ -189,7 +189,7 @@ async function loadChannels(force=false) {
 }
 function detailSignature(note) {
   if (!note) return '';
-  return JSON.stringify(['id','document_id','document_title','title','transcript','question','anchor','status','ignored','content_hash','answer_id','unread','in_sync_scope','time_trusted','device_modified','confidence','manual_transcript','tags','answer','answer_model','answer_provenance'].map(key=>note[key]));
+  return JSON.stringify(['id','document_id','document_title','title','transcript','question','anchor','status','ignored','content_hash','answer_id','unread','in_sync_scope','time_trusted','device_modified','confidence','manual_transcript','confirmation_stale','scope_conflicts','question_refs','tags','answer','answer_model','answer_provenance'].map(key=>note[key]));
 }
 async function loadNoteList(force=false) {
   const request=++state.searchRequest;
@@ -269,14 +269,21 @@ function renderDetail(note, historical = null) {
   $('#note-detail').innerHTML = `<div class="detail-bar"><button class="button quiet small back-button" data-action="back-to-list">← 返回列表</button><div class="detail-crumb" title="${esc(note.remote_path || note.document_title)}"><span class="crumb-doc">${esc(note.document_title)}</span><span class="crumb-rest"><span class="crumb-sep" aria-hidden="true">›</span>P${note.page} · ${note.time_trusted ? esc(fmt(note.device_modified,true)):'历史批注 · 日期不确定'}</span></div><div class="detail-actions"><button id="prev-note" class="icon-button" data-action="prev-note" aria-label="上一条笔记" title="上一条（k）">‹</button><button id="next-note" class="icon-button" data-action="next-note" aria-label="下一条笔记" title="下一条（j）">›</button><a class="button quiet small" href="${esc(note.pdf_url)}" target="_blank" rel="noopener"><span class="label-long">打开 PDF 第 ${note.page} 页</span><span class="label-short">PDF</span> ↗</a><button class="button quiet small" data-ignore-note="${note.id}" data-ignored="${note.ignored?'false':'true'}">${note.ignored?'恢复笔记':'忽略这条笔记'}</button></div></div>
     <div class="detail-body"><header class="detail-head"><h2>${esc(note.title)}</h2><div class="tag-row">${tags}${note.status==='needs_review' && !note.ignored?'<span class="badge review">待确认 · 请先核对转写</span>':badge(note)}</div>
     ${note.ignored?'<div class="notice">已忽略，暂停解读，可随时恢复。</div>':''}
+    ${note.confirmation_stale?'<div class="notice">笔迹已变更，需要重新确认。先前确认的文字与解答已保留；请核对转写，拆分或合并的内容也需重新确认。</div>':''}
     ${note.error?`<div class="notice error-text">${esc(note.error)}</div>`:''}
     ${note.in_sync_scope === false?'<div class="notice">这份文档不在当前同步文件夹内，已保留归档内容。若需继续解读，请在设备文件中添加所属文件夹。</div>':''}
     ${!note.time_trusted?'<p class="helper">这条批注的设备时间异常，只作为历史笔记归档，不计入近期统计。</p>':''}</header>
-    <div class="detail-panels"><section class="ink-panel" aria-label="原始笔迹"><div class="panel-title"><strong>原始笔迹</strong><span>${note.manual_transcript?'转写已人工核对':note.confidence!=null?'识别置信度 '+Math.round(note.confidence*100)+'%':'等待识别'}</span></div>
+    <div class="detail-panels"><section class="ink-panel" aria-label="原始笔迹"><div class="panel-title"><strong>原始笔迹</strong><span>${note.confirmation_stale?'笔迹已变更 · 待重新确认':note.manual_transcript?'转写已人工核对':note.confidence!=null?'识别置信度 '+Math.round(note.confidence*100)+'%':'等待识别'}</span></div>
     <div class="ink-frame">${note.preview_url?`<img src="${esc(note.preview_url)}?v=${esc(note.content_hash.slice(0,12))}" alt="第${note.page}页的原始笔迹和正文" loading="lazy" data-action="zoom-ink" title="点击放大">`:'<div class="empty">暂无笔迹截图</div>'}</div>
-    <div id="transcript-area"><div class="transcript-card"><div class="transcript-head"><span class="transcript-label">手写转写 / 提出的问题</span><button class="button quiet small" data-action="edit-note" ${note.ignored?'disabled':''}>${note.ignored?'恢复后可校正':note.status==='needs_review'?'核对转写':'校正文字'}</button></div><p>${esc(note.transcript || '尚未转写，可以手动填写，也可以使用视觉模型识别。')}</p>${note.question && note.question !== note.transcript?`<p class="muted">${esc(note.question)}</p>`:''}${note.anchor?`<p class="muted">标记：${esc(note.anchor)}</p>`:''}</div></div></section>
+    <div id="transcript-area"><div class="transcript-card"><div class="transcript-head"><span class="transcript-label">手写转写 / 提出的问题</span><button class="button quiet small" data-action="edit-note" ${note.ignored?'disabled':''}>${note.ignored?'恢复后可校正':note.status==='needs_review'?'核对转写':'校正文字'}</button></div><p>${esc(note.transcript || '尚未转写，可以手动填写，也可以使用视觉模型识别。')}</p>${note.question && note.question !== note.transcript?`<p class="muted">${esc(note.question)}</p>`:''}${note.anchor?`<p class="muted">标记：${esc(note.anchor)}</p>`:''}</div></div>${revisionHTML(note)}</section>
     <section class="answer-panel" aria-label="解答">${answer ? answerHTML(answer, provenance, source, note.status !== 'answered' || !!historical, tools) : note.ignored?'<div class="empty">这条笔记已忽略，原始笔迹仍在归档中。</div>': `<div class="empty"><strong>${note.status==='needs_review'?'转写待确认':'尚未解读'}</strong>${note.status==='needs_review'?'点“核对转写”，确认文字后再解读。':'识别笔迹并结合原文生成解答。'}<br><button class="button primary" data-action="analyze">${note.status==='needs_review'?'重新识别':'识别并解读'}</button></div>`}</section></div></div>`;
   updatePager();
+}
+function revisionHTML(note) {
+  const revisions = note.revisions || [], lineage = note.lineage || [];
+  if (!revisions.length && !lineage.length) return '';
+  const reasons = {handwriting_changed:'笔迹变更前',manual_edit:'人工校正前',archived:'归档前'};
+  return `<details class="transcript-card"><summary>笔记修订与关联记录</summary>${revisions.map(item=>`<div class="notice"><strong>${esc(reasons[item.reason] || item.reason)} · ${esc(fmt(item.created_at,true))}</strong><p>${esc(item.note.title)}</p><p>${esc(item.note.transcript || item.note.question || item.note.anchor || '无转写文字')}</p></div>`).join('')}${lineage.map(item=>`<details><summary>${item.relation==='split'?'拆分关联':'合并关联'}：#${Number(item.id)} ${esc(item.title)}${item.archived?'（已归档）':''}</summary><p>${esc(item.transcript || item.question || item.anchor || '无转写文字')}</p>${item.answer?`<p class="helper">关联笔记的先前解答</p><p>${esc(item.answer.summary)}</p><p>${esc(item.answer.explanation)}</p>${exerciseReviewsHTML(item.answer.exercise_reviews)}`:''}</details>`).join('')}</details>`;
 }
 function sourceHTML(value) {
   const text = String(value); const match = text.match(/https:\/\/[^\s<>]+/);

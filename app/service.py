@@ -23,7 +23,7 @@ from .paths import ROOT, database_path
 DEFAULTS = dict(device_address="", sync_clock=True, auto_sync=True,
                 sync_interval=180, auto_analyze=True, model_base_url="", model_name="",
                 model_api_key="", upload_folder="Document/收件箱", sync_folders=[], last_sync=None)
-ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor", "kind", "question_refs", "scope_status", "scope_version", "manual_transcript")
+ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor", "kind", "question_refs", "scope_status", "scope_version", "manual_transcript", "confirmation_stale")
 
 
 def analysis_version(note):
@@ -466,9 +466,12 @@ class Service:
             refs = normalize_refs(raw)
             if not isinstance(raw, list) or any(not normalize_ref(value) for value in raw):
                 raise ValueError("题号格式无效，请用逗号分隔；分节题号使用 2:8")
-        with self.note_lock:
+        with self.note_lock, self.store.transaction():
+            note = self.store.note(identifier)
+            if note["confirmation_stale"] or any(note[key] != value for key, value in fields.items()) or refs is not None and refs != note["question_refs"]:
+                self.store.capture_revision(note, "manual_edit")
             self.store.execute("UPDATE notes SET "+",".join(key+"=?" for key in fields)+
-                               ",manual_transcript=1,status='recognized',confidence=1,error='',unread=0,scope_status='unknown',scope_version=0,question_refs='[]',scope_conflicts='[]',activity_at=? WHERE id=?", (*fields.values(), now(), identifier))
+                               ",manual_transcript=1,confirmation_stale=0,status='recognized',confidence=1,error='',unread=0,scope_status='unknown',scope_version=0,question_refs='[]',scope_conflicts='[]',activity_at=? WHERE id=?", (*fields.values(), now(), identifier))
             if refs is not None:
                 self.store.execute("UPDATE notes SET question_refs=?,scope_status=?,scope_version=? WHERE id=?",
                                    (encode(refs), "known" if refs else "unknown", SCOPE_VERSION, identifier))
@@ -495,6 +498,8 @@ class Service:
                 return {"message": "笔记已忽略，已跳过解读"}
             if not self.document_active(note["document_id"]):
                 return {"message": "文档不在当前同步范围，已跳过解读"}
+            if note["confirmation_stale"]:
+                return {"message": "笔迹已变更，请先核对并确认转写；先前文字和解答已保留", "needs_review": True}
         start_hash = analysis_version(note)
         recognition = None
         try:
