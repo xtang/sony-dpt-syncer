@@ -85,7 +85,11 @@ class Store:
                         db.execute("UPDATE documents SET device_entry_id=? WHERE id=?", (metadata["entry_id"], row["id"]))
             db.execute("CREATE INDEX IF NOT EXISTS documents_device_id ON documents(device_entry_id)")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(notes)")}
-            for name, declaration in (("ignored", "INTEGER NOT NULL DEFAULT 0"), ("ignore_version", "INTEGER NOT NULL DEFAULT 0"), ("activity_at", "TEXT")):
+            for name, declaration in (("ignored", "INTEGER NOT NULL DEFAULT 0"), ("ignore_version", "INTEGER NOT NULL DEFAULT 0"), ("activity_at", "TEXT"),
+                                      ("question_refs", "TEXT NOT NULL DEFAULT '[]'"),
+                                      ("scope_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                                      ("scope_version", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("scope_conflicts", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE notes ADD COLUMN {name} {declaration}")
             db.execute("UPDATE notes SET activity_at=COALESCE((SELECT created_at FROM answers WHERE id=notes.answer_id),first_seen) WHERE activity_at IS NULL")
@@ -209,6 +213,8 @@ class Store:
     def decode_note(row):
         row["tags"] = json.loads(row["tags"] or "[]")
         row["annotation_ids"] = json.loads(row["annotation_ids"])
+        row["question_refs"] = json.loads(row["question_refs"])
+        row["scope_conflicts"] = json.loads(row["scope_conflicts"])
         row["answer"] = json.loads(row.pop("answer_payload", None) or "null")
         return row
 

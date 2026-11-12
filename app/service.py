@@ -14,7 +14,8 @@ from pathlib import Path
 
 from .device import DeviceClient, validate_address
 from .llm import ModelClient, validate_model_url
-from .pdf_notes import digest, ingest_pdf, render_page_context
+from .pdf_notes import digest, ingest_pdf, render_note_images
+from .note_scope import SCOPE_VERSION, recognition_scope, normalize_ref, normalize_refs, overlapping_refs, scope_answer
 from .store import Store, encode, now
 from .scope import folder_path, in_folders, normalize_folders
 from .paths import ROOT, database_path
@@ -22,7 +23,7 @@ from .paths import ROOT, database_path
 DEFAULTS = dict(device_address="", sync_clock=True, auto_sync=True,
                 sync_interval=180, auto_analyze=True, model_base_url="", model_name="",
                 model_api_key="", upload_folder="Document/收件箱", sync_folders=[], last_sync=None)
-ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor")
+ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor", "kind", "question_refs", "scope_status", "scope_version", "manual_transcript")
 
 
 def analysis_version(note):
@@ -457,9 +458,20 @@ class Service:
         fields = {key: str(values[key])[:8000] for key in ("transcript", "question", "anchor", "title") if key in values}
         if not fields:
             raise ValueError("没有可保存的内容")
+        refs = None
+        if "question_refs" in values:
+            raw = values["question_refs"]
+            if isinstance(raw, str):
+                raw = [value.strip() for value in re.split(r"[,，\s]+", raw) if value.strip()]
+            refs = normalize_refs(raw)
+            if not isinstance(raw, list) or any(not normalize_ref(value) for value in raw):
+                raise ValueError("题号格式无效，请用逗号分隔；分节题号使用 2:8")
         with self.note_lock:
             self.store.execute("UPDATE notes SET "+",".join(key+"=?" for key in fields)+
-                               ",manual_transcript=1,status='recognized',confidence=1,error='',unread=0,activity_at=? WHERE id=?", (*fields.values(), now(), identifier))
+                               ",manual_transcript=1,status='recognized',confidence=1,error='',unread=0,scope_status='unknown',scope_version=0,question_refs='[]',scope_conflicts='[]',activity_at=? WHERE id=?", (*fields.values(), now(), identifier))
+            if refs is not None:
+                self.store.execute("UPDATE notes SET question_refs=?,scope_status=?,scope_version=? WHERE id=?",
+                                   (encode(refs), "known" if refs else "unknown", SCOPE_VERSION, identifier))
         return self.store.note(identifier)
 
     def ignore_note(self, identifier, ignored):
@@ -489,26 +501,37 @@ class Service:
             snapshot = self.store.one("SELECT sha256,pdf_path FROM snapshots WHERE id=? AND document_id=?", (note["snapshot_id"], note["document_id"]))
             if not snapshot:
                 raise ValueError("缺少笔记对应的 PDF 版本，请重新同步文档")
-            page_image = render_page_context(snapshot["pdf_path"], note["page"],
-                self.data/"page-context"/(snapshot["sha256"]+f"-p{note['page']}.jpg"))
-            note["page_image_path"] = str(page_image)
+            images = render_note_images(snapshot["pdf_path"], note, self.data, snapshot["sha256"])
+            note.update(images)
             with self.note_lock:
                 current = self.store.note(identifier)
                 if current["archived"] or current["ignored"] or not self.document_active(note["document_id"]) or analysis_version(current)!=start_hash:
                     return {"message": "笔记或同步范围已更新，已跳过解读"}
-            if not note["manual_transcript"] and note["status"] not in ("recognized", "answered"):
+            needs_scope = note["scope_version"] != SCOPE_VERSION or note["scope_status"] == "unknown"
+            if (not note["manual_transcript"] and (needs_scope or note["status"] not in ("recognized", "answered"))) or (note["manual_transcript"] and note["kind"] == "answer" and needs_scope):
                 recognition = self.model.recognize(note)
                 with self.note_lock:
                     current = self.store.note(identifier)
                     if current["archived"] or current["ignored"] or not self.document_active(current["document_id"]) or analysis_version(current) != start_hash:
                         return {"message": "笔记已更新，本次识别结果已丢弃，请重新解读"}
+                    refs, scope_status = recognition_scope(recognition)
                     status = "recognized" if recognition["confidence"] >= .85 else "needs_review"
+                    if recognition["kind"] == "answer" and scope_status != "known":
+                        status = "needs_review"
+                    if note["manual_transcript"]:
+                        # Scope discovery must never overwrite human-confirmed wording.
+                        for field in ("transcript", "question", "anchor", "title", "kind"):
+                            recognition[field] = note[field]
+                        if note["kind"] == "answer" and scope_status != "known":
+                            status = "needs_review"
                     self.store.execute("""UPDATE notes SET transcript=?,question=?,anchor=?,title=?,kind=?,
                         confidence=?,tags=?,status=?,error='' WHERE id=?""", (recognition["transcript"], recognition["question"],
                         recognition["anchor"], recognition["title"] or "手写笔记", recognition["kind"], recognition["confidence"],
                         encode(recognition["tags"]), status, identifier))
+                    self.store.execute("UPDATE notes SET question_refs=?,scope_status=?,scope_version=?,scope_conflicts='[]' WHERE id=?",
+                                       (encode(refs), scope_status, SCOPE_VERSION, identifier))
                     note = self.store.note(identifier)
-                    note["page_image_path"] = str(page_image)
+                    note.update(images)
                 if status == "needs_review":
                     return {"message": "笔迹不够确定，请在笔记里核对转写后再解读", "needs_review": True}
             elif note["status"] == "needs_review" and not note["manual_transcript"]:
@@ -532,11 +555,19 @@ class Service:
                 current = self.store.note(identifier)
                 if current["archived"] or current["ignored"] or not self.document_active(note["document_id"]) or analysis_version(current)!=before_answer:
                     return {"message": "笔记或同步范围已更新，已跳过解读"}
-            answer = self.model.answer(note, related)
+                if self.scope_conflicts(current):
+                    return {"message": "同页笔记的题目归属冲突，请核对", "needs_review": True}
+            answer = scope_answer(self.model.answer(note, related), note)
             with self.note_lock:
                 current = self.store.note(identifier)
                 if current["archived"] or current["ignored"] or not self.document_active(current["document_id"]) or analysis_version(current) != before_answer:
                     return {"message": "笔记已更新，本次解读已丢弃，请重新解读"}
+                if self.scope_conflicts(current):
+                    return {"message": "同页笔记的题目归属冲突，请核对", "needs_review": True}
+                accepted_refs = {r["question_ref"] for r in answer.get("exercise_reviews", [])}
+                if note["kind"] == "answer" and (not accepted_refs or set(normalize_refs(note["question_refs"])) != accepted_refs):
+                    self.store.execute("UPDATE notes SET status='needs_review',error='作答范围未完整核对，请重新识别或核对目标题目' WHERE id=?", (identifier,))
+                    return {"message": "作答范围未完整核对", "needs_review": True}
                 self.store.save_answer(identifier, answer, self.settings()["model_name"])
             return {"message": "解读完成，已加入知识库", "note_id": identifier}
         except Exception as error:
@@ -545,6 +576,27 @@ class Service:
                 if current and not current["archived"] and not current["ignored"] and self.document_active(current["document_id"]) and analysis_version(current)==analysis_version(note):
                     self.store.execute("UPDATE notes SET status='error',error=? WHERE id=?", (self.safe_error(error), identifier))
             raise
+
+    def scope_conflicts(self, note):
+        """Called under note_lock before inference and again before publishing."""
+        if note["scope_version"] != SCOPE_VERSION or note["scope_status"] != "known":
+            return []
+        refs = set(normalize_refs(note["question_refs"]))
+        conflicts = []
+        for other in self.store.query("SELECT id,question_refs FROM notes WHERE document_id=? AND page=? AND id!=? AND archived=0 AND ignored=0 AND scope_version=? AND scope_status='known'",
+                                      (note["document_id"], note["page"], note["id"], SCOPE_VERSION)):
+            if overlapping_refs(list(refs), json.loads(other["question_refs"])):
+                conflicts.append(other["id"])
+        if conflicts:
+            # Preserve old answers as history, but withdraw both claims from current answers.
+            for identifier in [note["id"], *conflicts]:
+                current = self.store.note(identifier)
+                peers = set(current["scope_conflicts"]) | ({note["id"]} if identifier != note["id"] else set(conflicts))
+                self.store.execute("UPDATE notes SET status='needs_review',unread=0,scope_conflicts=?,error='同页笔记的题目归属冲突，请核对目标笔迹' WHERE id=?",
+                                   (encode(sorted(peers)), identifier))
+        elif note["scope_conflicts"]:
+            self.store.execute("UPDATE notes SET scope_conflicts='[]' WHERE id=?", (note["id"],))
+        return conflicts
 
     def upload(self, path, job=None):
         path = Path(path)

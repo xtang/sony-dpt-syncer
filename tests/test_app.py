@@ -317,13 +317,13 @@ class SyncerCase(unittest.TestCase):
 
     def test_ignore_while_preparing_images_stops_the_model_request(self):
         identifier=self.ingest()['notes'][0]
-        from app.pdf_notes import render_page_context
+        from app.pdf_notes import render_note_images
         def prepare(*args):
-            result=render_page_context(*args)
+            result=render_note_images(*args)
             self.service.ignore_note(identifier,True)
             return result
         self.service.model=Mock()
-        with patch('app.service.render_page_context',side_effect=prepare):
+        with patch('app.service.render_note_images',side_effect=prepare):
             self.service.analyze(identifier)
         self.service.model.recognize.assert_not_called()
         self.service.model.answer.assert_not_called()
@@ -433,12 +433,126 @@ class SyncerCase(unittest.TestCase):
         self.service.analyze(identifier)
         self.assertEqual(self.service.model.answer.call_args.args[1],[])
 
+    def test_target_images_hide_neighbours_and_preserve_original(self):
+        from app.pdf_notes import render_note_images, write_target_page
+        from pypdf import PdfReader
+        from PIL import Image, ImageChops
+        fixture_pdf(self.pdf, extra_note=True)
+        writer=PdfWriter(clone_from=self.pdf)
+        second=writer.pages[0]['/Annots'][1].get_object()
+        second[NameObject('/Rect')]=ArrayObject([FloatObject(x) for x in (300,170,320,190)])
+        second[NameObject('/InkList')]=ArrayObject([ArrayObject([FloatObject(x) for x in (300,170,320,190)])])
+        writer.write(self.pdf)
+        ids=self.ingest()['notes']
+        self.assertEqual(len(ids),2)
+        original=self.pdf.read_bytes()
+        note=self.service.store.note(ids[0])
+        images=render_note_images(self.pdf,note,self.service.data,'snapshot-a')
+        reader=PdfReader(self.pdf)
+        isolated=self.pdf.parent/'isolated.pdf'
+        write_target_page(reader,1,set(note['annotation_ids']),isolated)
+        self.assertEqual(len(extract_annotations(isolated)[1]),1)
+        self.assertEqual(len(extract_annotations(self.pdf)[1]),2)
+        clean=self.pdf.parent/'clean.pdf'
+        write_target_page(reader,1,set(),clean)
+        self.assertEqual(extract_annotations(clean)[1],[])
+        # A neighbouring stroke inside the padded crop disappears, not just its metadata.
+        with Image.open(note['preview_path']) as before, Image.open(images['model_preview_path']) as after:
+            self.assertEqual(before.size,after.size)
+            self.assertIsNotNone(ImageChops.difference(before,after).getbbox())
+        cached=Path(images['model_preview_path']).stat().st_mtime_ns
+        self.assertEqual(render_note_images(self.pdf,note,self.service.data,'snapshot-a'),images)
+        self.assertEqual(Path(images['model_preview_path']).stat().st_mtime_ns,cached)
+        changed=render_note_images(self.pdf,note,self.service.data,'snapshot-b')
+        self.assertNotEqual(changed['model_preview_path'],images['model_preview_path'])
+        self.assertEqual(self.pdf.read_bytes(),original)
+        self.assertEqual(self.ingest()['notes'],[])
+
+    def test_target_images_handle_all_rotations(self):
+        from app.pdf_notes import render_note_images
+        from PIL import Image
+        for rotation in (0,90,180,270):
+            fixture_pdf(self.pdf,rotation=rotation)
+            self.ingest()
+            note=self.service.store.notes()[0]
+            images=render_note_images(self.pdf,note,self.service.data,str(rotation))
+            with Image.open(images['model_preview_path']) as crop, Image.open(images['page_image_path']) as page:
+                self.assertGreater(crop.width,20)
+                self.assertGreater(crop.height,20)
+                self.assertEqual(page.width>page.height,rotation in (90,270))
+
+    def scoped_note(self, identifier, refs):
+        self.service.store.execute("UPDATE notes SET kind='answer',transcript='作答',question_refs=?,scope_status='known',scope_version=1,status='recognized' WHERE id=?",(json.dumps(refs),identifier))
+
+    def test_verified_conflict_withdraws_both_claims_but_keeps_history(self):
+        fixture_pdf(self.pdf,extra_note=True)
+        first,second=self.ingest()['notes']
+        for identifier in (first,second): self.scoped_note(identifier,['1'])
+        self.service.store.save_answer(first,dict(summary='prior',explanation='prior'),'test')
+        self.service.model=Mock()
+        result=self.service.analyze(second)
+        self.assertTrue(result['needs_review'])
+        self.service.model.answer.assert_not_called()
+        a,b=self.service.store.note(first),self.service.store.note(second)
+        self.assertEqual((a['status'],b['status']),('needs_review','needs_review'))
+        self.assertEqual(a['scope_conflicts'],[second])
+        self.assertEqual(b['scope_conflicts'],[first])
+        self.assertEqual(len(a['history']),1)
+        self.assertEqual(b['history'],[])
+        # Human scope correction resolves the conflict without overwriting history.
+        self.service.edit_note(second,dict(transcript='第2题选 A',question_refs='2'))
+        self.service.model.answer.return_value=dict(summary='new',explanation='new',exercise_reviews=[exercise_review(question_ref='2')])
+        self.service.analyze(second)
+        self.assertEqual(self.service.store.note(second)['status'],'answered')
+        self.service.model.recognize.assert_not_called()
+
+    def test_legacy_claim_does_not_block_verified_scope(self):
+        fixture_pdf(self.pdf,extra_note=True)
+        first,second=self.ingest()['notes']
+        self.service.store.save_answer(first,dict(summary='legacy',explanation='legacy',exercise_reviews=[exercise_review()]),'old')
+        self.scoped_note(second,['1'])
+        self.service.model=Mock()
+        self.service.model.answer.return_value=dict(summary='new',explanation='new',exercise_reviews=[exercise_review()])
+        self.service.analyze(second)
+        self.assertEqual(self.service.store.note(second)['status'],'answered')
+
+    def test_conflict_appearing_during_answer_prevents_publication(self):
+        fixture_pdf(self.pdf,extra_note=True)
+        first,second=self.ingest()['notes']
+        self.scoped_note(first,['1'])
+        self.service.model=Mock()
+        def answer(*args):
+            self.scoped_note(second,['1'])
+            return dict(summary='new',explanation='new',exercise_reviews=[exercise_review()])
+        self.service.model.answer.side_effect=answer
+        self.assertTrue(self.service.analyze(first)['needs_review'])
+        self.assertEqual(self.service.store.note(first)['history'],[])
+
+    def test_unknown_exercise_scope_stops_before_answer(self):
+        identifier=self.ingest()['notes'][0]
+        self.service.model=Mock()
+        self.service.model.recognize.return_value=dict(transcript='圈选',question='核对',anchor='',title='作答',kind='answer',confidence=.99,tags=[],question_refs=[],scope_status='unknown')
+        self.assertTrue(self.service.analyze(identifier)['needs_review'])
+        self.service.model.answer.assert_not_called()
+
+    def test_content_edit_invalidates_scope_and_missing_review_is_not_saved(self):
+        identifier=self.ingest()['notes'][0]
+        self.scoped_note(identifier,['1','2'])
+        self.service.model=Mock()
+        self.service.model.answer.return_value=dict(summary='both',explanation='both',exercise_reviews=[exercise_review()])
+        self.assertTrue(self.service.analyze(identifier)['needs_review'])
+        self.assertEqual(self.service.store.note(identifier)['history'],[])
+        fixture_pdf(self.pdf,position=130)
+        self.ingest()
+        note=self.service.store.note(identifier)
+        self.assertEqual((note['scope_version'],note['scope_status'],note['question_refs']),(0,'unknown',[]))
+
     def test_scanned_exercise_uses_page_images_and_archives_explanation(self):
         identifier=self.ingest()['notes'][0]
         self.assertEqual(self.service.store.note(identifier)['source_text'],'')
         client=ModelClient(self.service.settings)
         client.completion=Mock(side_effect=[
-            dict(transcript='第1题选 A',question='核对第1题的作答',anchor='2 + 3 = ?',title='第1题作答',kind='answer',confidence=.97,tags=['加法']),
+            dict(transcript='第1题选 A',question='核对第1题的作答',anchor='2 + 3 = ?',title='第1题作答',kind='answer',confidence=.97,tags=['加法'],question_refs=['1'],scope_status='known'),
             dict(summary='第1题需要订正',explanation='详见逐题解析。',exercise_reviews=[exercise_review()])
         ])
         self.service.model=client
@@ -929,16 +1043,62 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(note['answer']['summary'],'Saved')
             self.assertEqual((note['ignored'],note['ignore_version'],note['unread']),(0,0,1))
             self.assertEqual(note['activity_at'],'2026-11-12T02:00:00Z')
+            self.assertEqual((note['question_refs'],note['scope_status'],note['scope_version'],note['scope_conflicts']),([], 'unknown', 0, []))
             self.assertEqual(store.channels()[0]['unread'],1)
             Store(path)
             self.assertEqual(store.note(1)['activity_at'],note['activity_at'])
 
     def exercise_answer(self,reviews,source='Question and options',**note_changes):
-        note=dict(question='',transcript='第1题选 A',anchor='',document_title='练习文档',page=1,source_text=source,kind='answer')
+        note=dict(question='',transcript='第1题选 A',anchor=source,document_title='练习文档',page=1,source_text=source,kind='answer',question_refs=['1','2'],scope_status='known')
         note.update(note_changes)
         client=ModelClient(lambda:{})
         client.completion=Mock(return_value=dict(summary='作答核对',explanation='解析',exercise_reviews=reviews))
         return client.answer(note,[])
+
+    def test_scope_filter_removes_neighbour_reviews_and_all_summary_prose(self):
+        note=dict(question='',transcript='第8题选 A',anchor='',document_title='练习',page=2,source_text='',kind='answer',question_refs=['8'],scope_status='known')
+        client=ModelClient(lambda:{})
+        client.completion=Mock(return_value=dict(summary='第7题错误，第8题正确，第9题错误',explanation='邻题解析',examples=[dict(text='邻题')],tags=['邻题'],uncertainties=['邻题'],exercise_reviews=[exercise_review(question_ref=str(i)) for i in (7,8,8,9)]))
+        result=client.answer(note,[])
+        self.assertEqual([r['question_ref'] for r in result['exercise_reviews']],['8'])
+        for field in ('summary','explanation','examples','tags','uncertainties'):
+            self.assertNotIn('邻题',str(result[field]))
+            self.assertNotIn('第7题',str(result[field]))
+            self.assertNotIn('第9题',str(result[field]))
+
+    def test_reference_normalization_keeps_sections_distinct_and_unknown_empty(self):
+        from app.note_scope import normalize_refs, recognition_scope
+        self.assertEqual(normalize_refs(['第８题','8','問題2：第８题','問題3:8',False,None,'8-10']),['8','2:8','3:8'])
+        self.assertEqual(recognition_scope(dict(kind='answer',scope_status='known',question_refs=[])),([], 'unknown'))
+        self.assertEqual(recognition_scope(dict(kind='note',scope_status='not_applicable',question_refs=[])),([], 'not_applicable'))
+        result=self.exercise_answer([exercise_review(question_ref='2:8'),exercise_review(question_ref='3:8')],question_refs=['2:8'])
+        self.assertEqual([r['question_ref'] for r in result['exercise_reviews']],['2:8'])
+
+    def test_answer_reference_accepts_printed_section_label_without_losing_scope(self):
+        from app.note_scope import normalize_ref
+        self.assertEqual(normalize_ref('問題2 第8题'), '2:8')
+        self.assertEqual(normalize_ref('問題3 第8题'), '3:8')
+        result=self.exercise_answer([exercise_review(question_ref='問題2 第8题'),exercise_review(question_ref='問題2 第9题')],question_refs=['8'])
+        self.assertEqual([r['question_ref'] for r in result['exercise_reviews']], ['8'])
+        result=self.exercise_answer([exercise_review(question_ref='問題2 第8题'),exercise_review(question_ref='問題3 第8题'),exercise_review(question_ref=8)],question_refs=['2:8'])
+        self.assertEqual([r['question_ref'] for r in result['exercise_reviews']], ['2:8'])
+        result=self.exercise_answer([exercise_review(question_ref=8)],question_refs=['8'])
+        self.assertEqual([r['question_ref'] for r in result['exercise_reviews']], ['8'])
+
+    def test_answer_text_context_is_anchor_centred_and_excludes_old_answers(self):
+        source='unrelated prefix '*1000+'TARGET QUESTION'+' trailing '*1000
+        note=dict(question='check',transcript='8: A',anchor='TARGET QUESTION',document_title='exercise',page=2,source_text=source,kind='answer',question_refs=['8'],scope_status='known')
+        client=ModelClient(lambda:{})
+        client.completion=Mock(return_value=dict(summary='answer',explanation='details',exercise_reviews=[]))
+        client.answer(note,[dict(summary='old answer')])
+        context=json.loads(client.completion.call_args.args[0][1]['content'][0]['text'])
+        self.assertIn('TARGET QUESTION',context['source_text'])
+        self.assertLess(len(context['source_text']),2000)
+        self.assertEqual(context['related_notes'],[])
+        note['anchor']='not present'
+        client.answer(note,[])
+        context=json.loads(client.completion.call_args.args[0][1]['content'][0]['text'])
+        self.assertEqual(context['source_text'],'')
 
     def test_exercise_review_preserves_wrong_and_correct_answers(self):
         correct=exercise_review(question_ref='第2题',user_answer='B. 5',verdict='correct',explanation='2 + 3 = 5，选择正确。')

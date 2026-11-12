@@ -307,7 +307,7 @@ function answerHTML(answer, provenance, source, previous, tools = '') {
 function editNote() {
   const note = state.detail; if (!note) return;
   state.editing = true;
-  $('#transcript-area').innerHTML = `<form id="edit-note-form" class="edit-form"><label>笔记标题<input name="title" value="${esc(note.title)}"></label><label>手写原文<textarea name="transcript">${esc(note.transcript)}</textarea></label><label>标记的原文<input name="anchor" value="${esc(note.anchor)}"></label><label>希望解答的问题<textarea name="question">${esc(note.question)}</textarea></label><div class="row"><button class="button primary small" type="submit">确认并解读</button><button class="button quiet small" type="button" data-action="save-transcript">只保存文字</button><button class="text-button" type="button" data-action="cancel-edit" aria-label="取消编辑">×</button></div></form>`;
+  $('#transcript-area').innerHTML = `<form id="edit-note-form" class="edit-form"><label>笔记标题<input name="title" value="${esc(note.title)}"></label><label>手写原文<textarea name="transcript">${esc(note.transcript)}</textarea></label><label>标记的原文<input name="anchor" value="${esc(note.anchor)}"></label><label>希望解答的问题<textarea name="question">${esc(note.question)}</textarea></label>${note.kind==='answer'?`<label>当前笔迹对应的题号<input name="question_refs" value="${esc((note.question_refs || []).join(', '))}" placeholder="例如 8, 9；分节题号用 2:8"></label>`:''}<div class="row"><button class="button primary small" type="submit">确认并解读</button><button class="button quiet small" type="button" data-action="save-transcript">只保存文字</button><button class="text-button" type="button" data-action="cancel-edit" aria-label="取消编辑">×</button></div></form>`;
 }
 async function saveTranscript(analyze) {
   const form = $('#edit-note-form'); if (!form) return;

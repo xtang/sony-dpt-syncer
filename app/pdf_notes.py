@@ -9,8 +9,9 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from PIL import Image
-from pypdf import PdfReader
+from PIL import Image, ImageDraw
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, NameObject
 
 
 def digest(value):
@@ -40,6 +41,25 @@ def trusted_date(value):
     return bool(date and 2015 <= date.year and date <= datetime.now(timezone.utc) + timedelta(days=1))
 
 
+def annotation_payload(annotation):
+    subtype = str(annotation.get("/Subtype", ""))
+    if subtype in ("/Link", "/Widget", "/Popup"):
+        return None
+    if int(annotation.get("/F", 0)) & 3:
+        return None
+    rect = [round(float(v), 2) for v in annotation.get("/Rect", [])]
+    if len(rect) != 4:
+        return None
+    strokes = [[round(float(v), 2) for v in stroke] for stroke in annotation.get("/InkList", [])]
+    payload = {"subtype": subtype, "rect": rect, "strokes": strokes,
+               "contents": str(annotation.get("/Contents", "")),
+               "quads": [round(float(v), 2) for v in annotation.get("/QuadPoints", [])],
+               "color": [float(v) for v in annotation.get("/C", [])]}
+    fingerprint = digest(payload)
+    identifier = str(annotation.get("/NM", "")) or fingerprint
+    return dict(id=identifier, fingerprint=fingerprint, **payload)
+
+
 def extract_annotations(path):
     reader = PdfReader(path)
     if reader.is_encrypted:
@@ -50,22 +70,10 @@ def extract_annotations(path):
         page_texts[number] = (page.extract_text() or "")[:10000]
         for reference in page.get("/Annots", []):
             annotation = reference.get_object()
-            subtype = str(annotation.get("/Subtype", ""))
-            if subtype in ("/Link", "/Widget", "/Popup"):
+            payload = annotation_payload(annotation)
+            if payload is None:
                 continue
-            if int(annotation.get("/F", 0)) & 3:
-                continue
-            rect = [round(float(v), 2) for v in annotation.get("/Rect", [])]
-            if len(rect) != 4:
-                continue
-            strokes = [[round(float(v), 2) for v in stroke] for stroke in annotation.get("/InkList", [])]
-            payload = {"subtype": subtype, "rect": rect, "strokes": strokes,
-                       "contents": str(annotation.get("/Contents", "")),
-                       "quads": [round(float(v), 2) for v in annotation.get("/QuadPoints", [])],
-                       "color": [float(v) for v in annotation.get("/C", [])]}
-            fingerprint = digest(payload)
-            identifier = str(annotation.get("/NM", "")) or fingerprint
-            annotations.append(dict(id=identifier, page=number, fingerprint=fingerprint,
+            annotations.append(dict(page=number,
                                     created=str(annotation.get("/CreationDate", "")),
                                     modified=str(annotation.get("/M", "")), **payload))
     return reader, annotations, page_texts
@@ -98,10 +106,11 @@ def group_annotations(annotations):
 
 def crop_group(pdf, page_number, group, destination, page):
     width, height = float(page.mediabox.width), float(page.mediabox.height)
-    left = max(0, min(item["rect"][0] for item in group) - 32)
-    right = min(width, max(item["rect"][2] for item in group) + 38)
-    bottom = max(0, min(item["rect"][1] for item in group) - 75)
-    top = min(height, max(item["rect"][3] for item in group) + 62)
+    origin_x, origin_y = float(page.mediabox.left), float(page.mediabox.bottom)
+    left = max(0, min(item["rect"][0]-origin_x for item in group) - 32)
+    right = min(width, max(item["rect"][2]-origin_x for item in group) + 38)
+    bottom = max(0, min(item["rect"][1]-origin_y for item in group) - 75)
+    top = min(height, max(item["rect"][3]-origin_y for item in group) + 62)
     # Add printed context around a short handwritten question or circled answer.
     if right-left < width*.65:
         center = (left+right)/2
@@ -137,7 +146,7 @@ def group_time(group):
 
 
 def render_page_context(pdf, page_number, destination):
-    """Cache one annotated page so scanned questions retain their printed context."""
+    """Render page context; model callers supply an annotation-free temporary PDF."""
     destination = Path(destination)
     if destination.is_file():
         return destination
@@ -152,6 +161,66 @@ def render_page_context(pdf, page_number, destination):
         destination.write_bytes(prefix.with_suffix(".jpg").read_bytes())
     return destination
 
+
+
+MODEL_RENDER_VERSION = 1
+
+
+def write_target_page(reader, page_number, identifiers, destination):
+    """Copy one page, retaining only explicitly selected annotations. Never edit source."""
+    writer = PdfWriter()
+    page = writer.add_page(reader.pages[page_number-1])
+    kept = ArrayObject()
+    for reference in page.get("/Annots", []):
+        item = annotation_payload(reference.get_object())
+        if item and item["id"] in identifiers:
+            kept.append(reference)
+    page[NameObject("/Annots")] = kept
+    # A single MediaBox coordinate system for crop and target marker rendering.
+    page.cropbox = page.mediabox
+    writer.write(destination)
+    return page
+
+
+def render_note_images(pdf, note, data_dir, snapshot_sha):
+    reader, annotations, _ = extract_annotations(pdf)
+    identifiers = set(note["annotation_ids"])
+    group = [a for a in annotations if a["page"] == note["page"] and a["id"] in identifiers]
+    if not group or {a["id"] for a in group} != identifiers:
+        raise ValueError("笔记与 PDF 批注不匹配，请重新同步")
+    key = digest([MODEL_RENDER_VERSION, snapshot_sha, note["page"], sorted(identifiers),
+                  [a["fingerprint"] for a in group]])
+    crop = Path(data_dir)/"model-previews"/(key+".png")
+    full = Path(data_dir)/"page-context"/(key+".jpg")
+    if crop.is_file() and full.is_file():
+        return {"model_preview_path": str(crop), "page_image_path": str(full)}
+    with tempfile.TemporaryDirectory(prefix="dpt-isolated-") as work:
+        target = Path(work)/"target.pdf"
+        page = write_target_page(reader, note["page"], identifiers, target)
+        crop_group(target, 1, group, crop, page)
+        clean = Path(work)/"clean.pdf"
+        page = write_target_page(reader, note["page"], set(), clean)
+        rendered = render_page_context(clean, 1, Path(work)/"clean.jpg")
+        width, height = float(page.mediabox.width), float(page.mediabox.height)
+        x0, y0 = float(page.mediabox.left), float(page.mediabox.bottom)
+        left = min(a["rect"][0] for a in group)-x0
+        bottom = min(a["rect"][1] for a in group)-y0
+        right = max(a["rect"][2] for a in group)-x0
+        top = max(a["rect"][3] for a in group)-y0
+        rotation = int(page.get("/Rotate", 0)) % 360
+        coords = {0: (left,height-top,right,height-bottom),
+                  90: (bottom,left,top,right),
+                  180: (width-right,bottom,width-left,top),
+                  270: (height-top,width-right,height-bottom,width-left)}[rotation]
+        with Image.open(rendered) as image:
+            sx, sy = image.width/(height if rotation in (90,270) else width), image.height/(width if rotation in (90,270) else height)
+            box = [coords[0]*sx,coords[1]*sy,coords[2]*sx,coords[3]*sy]
+            ImageDraw.Draw(image).rectangle(box, outline="#dc2626", width=4)
+            full.parent.mkdir(parents=True, exist_ok=True)
+            temporary = Path(work)/"marked.jpg"
+            image.save(temporary, "JPEG", quality=90)
+            full.write_bytes(temporary.read_bytes())
+    return {"model_preview_path": str(crop), "page_image_path": str(full)}
 
 def ingest_pdf(store, data_dir, document_id, path, metadata=None):
     data_dir, path = Path(data_dir), Path(path)
@@ -194,7 +263,7 @@ def ingest_pdf(store, data_dir, document_id, path, metadata=None):
         if old:
             store.execute("""UPDATE notes SET snapshot_id=?,content_hash=?,preview_path=?,source_text=?,
                 device_created=?,device_modified=?,time_trusted=?,last_seen=?,status='pending',
-                confidence=NULL,manual_transcript=0,archived=0,error='',unread=0,activity_at=? WHERE id=?""", (*values.values(), now(), old["id"]))
+                confidence=NULL,manual_transcript=0,archived=0,error='',unread=0,question_refs='[]',scope_status='unknown',scope_version=0,scope_conflicts='[]',activity_at=? WHERE id=?""", (*values.values(), now(), old["id"]))
             store.execute("UPDATE notes SET transcript=?,question='',anchor='' WHERE id=?", (text, old["id"]))
             changed_notes.append(old["id"])
         else:
