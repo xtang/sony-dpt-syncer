@@ -1,0 +1,30 @@
+services:
+  study:
+    build: .
+    image: n2-study:${RELEASE_ID:-local}
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${APP_LISTEN_ADDRESS:-127.0.0.1}:4387:4387"
+    volumes:
+      - ${STUDY_DATA_DIR:-./output/study}:/data
+    environment:
+      APP_DATA_DIR: /data
+      DPT_AUTH_DIR: /data/auth
+      APP_BIND: 0.0.0.0
+      APP_PORT: "4387"
+      APP_ALLOWED_HOSTS: "${APP_ALLOWED_HOSTS:-localhost},${APP_LISTEN_ADDRESS:-127.0.0.1}"
+      DPT_ADDRESS: ${DPT_ADDRESS:-}
+      APP_ACCESS_FILE: /data/web-access.json
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

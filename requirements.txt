@@ -1,0 +1,7 @@
+# Versions used by the local PDF-generation and DPT-transfer environments.
+numpy==2.3.5
+Pillow==12.2.0
+pypdf==6.10.0
+reportlab==4.4.9
+dpt-rp1-py==0.1.20
+requests==2.34.2

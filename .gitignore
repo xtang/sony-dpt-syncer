@@ -1,0 +1,52 @@
+# Local exam materials and generated artifacts
+/N2真题/
+/output/
+/tmp/
+*.zip
+
+# Local tools, virtual environments, and DPT pairing credentials
+/.tools/
+/.venv/
+/venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+deviceid.dat
+privatekey.dat
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+/build/
+/dist/
+
+# macOS metadata
+.DS_Store
+._*
+
+# Private runtime data and recovery archives, wherever they are stored
+/data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+*.pdf
+*.bundle
+*.tar.gz
+settings.json
+web-access.json
+deploy-options.json
+*.log
