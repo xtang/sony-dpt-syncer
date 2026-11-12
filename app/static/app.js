@@ -282,7 +282,7 @@ function renderDetail(note, historical = null) {
 function revisionHTML(note) {
   const revisions = note.revisions || [], lineage = note.lineage || [];
   if (!revisions.length && !lineage.length) return '';
-  const reasons = {handwriting_changed:'笔迹变更前',manual_edit:'人工校正前',archived:'归档前'};
+  const reasons = {handwriting_changed:'笔迹变更前',manual_edit:'人工校正前',archived:'归档前',historical_repair:'历史修复前'};
   return `<details class="transcript-card"><summary>笔记修订与关联记录</summary>${revisions.map(item=>`<div class="notice"><strong>${esc(reasons[item.reason] || item.reason)} · ${esc(fmt(item.created_at,true))}</strong><p>${esc(item.note.title)}</p><p>${esc(item.note.transcript || item.note.question || item.note.anchor || '无转写文字')}</p></div>`).join('')}${lineage.map(item=>`<details><summary>${item.relation==='split'?'拆分关联':'合并关联'}：#${Number(item.id)} ${esc(item.title)}${item.archived?'（已归档）':''}</summary><p>${esc(item.transcript || item.question || item.anchor || '无转写文字')}</p>${item.answer?`<p class="helper">关联笔记的先前解答</p><p>${esc(item.answer.summary)}</p><p>${esc(item.answer.explanation)}</p>${exerciseReviewsHTML(item.answer.exercise_reviews)}`:''}</details>`).join('')}</details>`;
 }
 function sourceHTML(value) {

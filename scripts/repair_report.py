@@ -49,6 +49,16 @@ def normalized_text(value):
     return re.sub(r'\W+', '', unicodedata.normalize('NFKC', value or '').casefold())
 
 
+
+def report_rows(connection):
+    return [dict(row) for row in connection.execute('''SELECT n.*,d.title AS document_title,
+            d.tracked,d.device_present,s.sha256 AS snapshot_sha,s.pdf_path,
+            a.payload AS answer_payload,a.provenance AS answer_provenance
+            FROM notes n JOIN documents d ON d.id=n.document_id
+            LEFT JOIN snapshots s ON s.id=n.snapshot_id
+            LEFT JOIN answers a ON a.id=n.answer_id WHERE n.archived=0 ORDER BY n.id''')]
+
+
 def build_report(database):
     """Never use Store/Service: their constructors perform migrations and job updates."""
     database = Path(database).resolve(strict=True)
@@ -57,12 +67,7 @@ def build_report(database):
     try:
         connection.execute('PRAGMA query_only=ON')
         connection.execute('BEGIN')
-        notes = [dict(row) for row in connection.execute('''SELECT n.*,d.title AS document_title,
-            d.tracked,d.device_present,s.sha256 AS snapshot_sha,s.pdf_path,
-            a.payload AS answer_payload,a.provenance AS answer_provenance
-            FROM notes n JOIN documents d ON d.id=n.document_id
-            LEFT JOIN snapshots s ON s.id=n.snapshot_id
-            LEFT JOIN answers a ON a.id=n.answer_id WHERE n.archived=0 ORDER BY n.id''')]
+        notes = report_rows(connection)
         archived_count = connection.execute('SELECT COUNT(*) FROM notes WHERE archived=1').fetchone()[0]
     finally:
         connection.close()

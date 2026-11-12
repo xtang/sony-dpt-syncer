@@ -1,6 +1,8 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import Mock
+from scripts.repair_notes import run_repair
 from pathlib import Path
 
 from pypdf import PdfWriter
@@ -96,6 +98,59 @@ class RepairReportTests(unittest.TestCase):
         report=self.report()
         self.assertEqual(report['summary']['active_notes'],1)
         self.assertEqual(report['summary']['archived_notes_excluded'],1)
+
+    def fake_model(self):
+        model=Mock()
+        model.recognize.return_value=dict(title='corrected',transcript='isolated handwriting',question='explain',anchor='target',kind='note',confidence=.99,tags=[],question_refs=[],scope_status='not_applicable')
+        model.answer.return_value=dict(summary='corrected answer',explanation='details',exercise_reviews=[])
+        return model
+
+    def test_approved_repair_keeps_backup_old_answers_and_running_jobs(self):
+        first,second=self.ids
+        self.service.store.execute('UPDATE notes SET manual_transcript=1 WHERE id=?',(first,))
+        approved=self.report()
+        before=self.service.store.note(first)
+        old_answers=self.service.store.query('SELECT * FROM answers ORDER BY id')
+        job=self.service.store.job('sync');self.service.store.update_job(job,status='running')
+        result=run_repair(self.service.store.path,approved,self.root/'run',self.service.settings(),model=self.fake_model(),workers=1)
+        self.assertEqual([n['id'] for n in result['applied']],[second])
+        self.assertEqual(result['model_calls'],dict(recognition=1,answer=1))
+        self.assertTrue(Path(result['backup']).is_file())
+        self.assertEqual(self.service.store.note(first),before)
+        self.assertEqual(self.service.store.query('SELECT * FROM answers WHERE id<=? ORDER BY id',(old_answers[-1]['id'],)),old_answers)
+        changed=self.service.store.note(second)
+        self.assertEqual(changed['title'],'corrected')
+        self.assertEqual(changed['revisions'][0]['reason'],'historical_repair')
+        self.assertEqual(len(changed['history']),2)
+        self.assertEqual(self.service.store.one('SELECT status FROM jobs WHERE id=?',(job,))['status'],'running')
+
+    def test_repair_does_not_overwrite_edits_made_during_model_calls(self):
+        first,second=self.ids
+        approved=self.report();model=self.fake_model()
+        def answer(*args):
+            self.service.store.execute('UPDATE notes SET transcript=?,manual_transcript=1 WHERE id=?',('user edit during repair',first))
+            return dict(summary='new answer',explanation='new details')
+        model.answer.side_effect=answer
+        result=run_repair(self.service.store.path,approved,self.root/'run',self.service.settings(),model=model,workers=1)
+        self.assertEqual(result['skipped'],[dict(id=first,reason='changed_since_report')])
+        self.assertEqual([n['id'] for n in result['applied']],[second])
+        self.assertEqual(self.service.store.note(first)['transcript'],'user edit during repair')
+        self.assertEqual(self.service.store.note(first)['revisions'],[])
+
+    def test_repair_rechecks_conflicts_without_changing_protected_notes(self):
+        first,second=self.ids
+        self.service.store.execute('UPDATE notes SET manual_transcript=1 WHERE id=?',(first,))
+        approved=self.report();model=self.fake_model()
+        model.recognize.return_value=dict(title='answer',transcript='8: A',question='check',anchor='question',kind='answer',confidence=.99,tags=[],question_refs=['8'],scope_status='known')
+        def answer(*args):
+            self.service.store.execute("UPDATE notes SET scope_status='known',scope_version=1,question_refs='[\"8\"]' WHERE id=?",(first,))
+            return dict(summary='answer',explanation='answer',exercise_reviews=[dict(question_ref='8',verdict='correct')])
+        model.answer.side_effect=answer
+        result=run_repair(self.service.store.path,approved,self.root/'run',self.service.settings(),model=model,workers=1)
+        self.assertEqual(result['applied'][0]['status'],'needs_review')
+        self.assertEqual(result['applied'][0]['conflicts'],[first])
+        self.assertEqual(self.service.store.note(first)['status'],'answered')
+        self.assertEqual(self.service.store.note(second)['status'],'needs_review')
 
     def test_already_scoped_note_is_not_flagged_for_unfiltered_ui_crop_alone(self):
         self.service.store.execute("UPDATE notes SET scope_version=1,transcript='',status='needs_review'")

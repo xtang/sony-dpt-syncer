@@ -68,7 +68,7 @@ def package(destination, include_pairing=False):
     source = destination/"dpt-syncer-code.tar.gz"
     files = application_sources(ROOT)
     files += [ROOT/p for p in ["Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example", "README.md", "LICENSE", "requirements.txt",
-        "scripts/install_remote.sh", "scripts/repair_report.py",
+        "scripts/install_remote.sh", "scripts/repair_report.py", "scripts/repair_notes.py",
         "scripts/deploy.sh", "scripts/deploy.py", "scripts/package.py", "scripts/open.command", "scripts/start.command",
         "docs/usage.md"]]
     files += list((ROOT/"tests").glob("test_*.py"))
