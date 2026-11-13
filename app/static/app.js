@@ -92,12 +92,13 @@ async function refreshState() {
     if (!state.initialized) fillSettings(app.settings);
     state.initialized = true;
     if (state.view === 'notes') await loadNotes(false);
+    else if (state.view === 'report') await loadDailySummaries();
     else if (state.view === 'files' && (inventoryChanged || !previous || previous.settings.last_sync !== app.settings.last_sync || JSON.stringify(previous.settings.sync_folders)!==JSON.stringify(roots))) await loadFiles();
   } catch (error) { $('#connection-error').hidden = false; }
 }
 function fillSettings(settings) {
   const form = $('#settings-form');
-  for (const key of ['device_address','upload_folder','model_base_url','model_name','sync_interval','sync_clock','auto_sync','auto_analyze']) {
+  for (const key of ['device_address','upload_folder','model_base_url','model_name','sync_interval','sync_clock','auto_sync','auto_analyze','daily_summary_enabled','daily_summary_time','daily_summary_timezone']) {
     const field = form.elements.namedItem(key);
     if (field.type === 'checkbox') field.checked = settings[key]; else field.value = settings[key] ?? '';
   }
@@ -105,8 +106,8 @@ function fillSettings(settings) {
 async function saveSettings() {
   const form = $('#settings-form');
   const values = {};
-  for (const key of ['device_address','upload_folder','model_base_url','model_name','sync_interval']) values[key] = form.elements.namedItem(key).value.trim();
-  for (const key of ['sync_clock','auto_sync','auto_analyze']) values[key] = form.elements.namedItem(key).checked;
+  for (const key of ['device_address','upload_folder','model_base_url','model_name','sync_interval','daily_summary_time','daily_summary_timezone']) values[key] = form.elements.namedItem(key).value.trim();
+  for (const key of ['sync_clock','auto_sync','auto_analyze','daily_summary_enabled']) values[key] = form.elements.namedItem(key).checked;
   const key = form.elements.namedItem('model_api_key').value.trim();
   if (key || form.elements.namedItem('clear_api_key').checked) values.model_api_key = form.elements.namedItem('clear_api_key').checked ? '' : key;
   const settings = await api('/api/settings', values);
@@ -241,8 +242,13 @@ async function openNote(identifier,markRead=true) {
   if (state.noteMode==='documents') state.channel=state.channels.find(channel=>channel.id===note.document_id) || {...(state.channel?.id===note.document_id?state.channel:{}),id:note.document_id,title:note.document_title,remote_path:note.remote_path,unread:0};
   state.detail=note;
   renderDetail(note);renderNav();
-  if (markRead) await markCurrentNoteRead();
+  if (markRead) { await recordCurrentView(); await markCurrentNoteRead(); }
   if (differentDocument) await loadNoteList(false);
+}
+async function recordCurrentView() {
+  const note=state.detail;
+  if (document.hidden || state.view!=='notes' || state.editing || state.historyAnswer || !note || note.id!==state.selected || note.ignored) return;
+  await api(`/api/notes/${note.id}/view`,{});
 }
 async function markCurrentNoteRead() {
   const note=state.detail;
@@ -374,6 +380,49 @@ function renderFiles() {
 async function loadReport() {
   const report = await api('/api/report?days='+$('#report-days').value);
   $('#report-content').innerHTML = `<div class="stats-row">${stat(report.recent_notes,'本期更新的笔记')}${stat(report.answered,'已整理出解答')}${stat(report.needs_review,'待确认笔迹')}${stat(report.uncertain_time,'日期不确定的旧笔记')}</div><div class="report-grid"><section class="surface report-card"><h2>最近记录的主题</h2>${report.topics.length?report.topics.map(([tag,count])=>`<div class="topic-row"><span>${esc(tag)}</span><span>${count} 条笔记</span></div>`).join(''):'<p class="helper">本期还没有已标注主题的笔记。同步并解读后会在这里归纳。</p>'}<p class="helper">本页只统计当前同步文件夹中的笔记，范围外的历史记录仍可在知识库查看。</p></section><section class="surface report-card"><h2>尚待处理</h2>${report.next_steps.length?report.next_steps.map((item,index)=>`<div class="next-step"><span>${String(index+1).padStart(2,'0')}</span><button data-goto-note="${item.id}">${esc(item.title)}<small>${esc(item.reason)}</small></button></div>`).join(''):'<p class="helper">当前同步范围内没有待处理的笔记。</p>'}</section><section class="surface report-card"><h2>这份回顾的依据</h2><p class="helper">${esc(report.limitation)}</p><p class="helper">按可信的设备批注修改时间统计，每处笔记只计一次。修改日期会随后续编辑更新。</p><p class="helper">生成时间：${esc(fmt(report.generated_at))}</p></section></div>`;
+  await loadDailySummaries();
+}
+
+const dailyLabels={ready:'已生成',empty:'无学习记录',running:'生成中',error:'生成失败'};
+let dailyRequest=0, dailySelected=null, dailyZone=null, dailyDateChosen=false;
+function summaryMarkdown(text) {
+  return String(text).split(/\n\s*\n/).map(block=>{
+    if (/^#{1,6} /.test(block) && !block.includes('\n')) return `<h3>${esc(block.replace(/^#+ /,''))}</h3>`;
+    if (block.split('\n').every(line=>line.startsWith('- '))) return '<ul>'+block.split('\n').map(line=>`<li>${esc(line.slice(2))}</li>`).join('')+'</ul>';
+    return `<p>${esc(block).replace(/\n/g,'<br>')}</p>`;
+  }).join('');
+}
+function renderDailySummary(row, queued=false) {
+  dailyZone=row?.timezone || null;
+  const complete=row && ['ready','empty'].includes(row.status);
+  $('#generate-daily').disabled=Boolean(complete || queued || row?.status==='running');
+  $('#generate-daily').textContent=row?.status==='error'?'重试这一天的总结':'生成这一天的总结';
+  let html='<p class="helper">这一天还没有总结。可以手动生成，或开启每日定时总结。</p>';
+  if (row) {
+    html=`<p class="helper">${esc(row.study_date)} · ${esc(row.timezone)} · ${Number(row.note_count)} 条笔记 · ${esc(dailyLabels[row.status] || row.status)}</p>`;
+    if (complete) html+=`<a class="button quiet small" href="/api/daily-summaries/${Number(row.id)}/download" download>下载 Markdown</a><article class="daily-markdown">${summaryMarkdown(row.markdown)}</article>`+
+      (row.sources.length?`<details><summary>打开来源笔记（${row.sources.length}）</summary><div class="daily-sources">${row.sources.map(source=>`<button class="button quiet small" data-goto-note="${Number(source.id)}">${esc(source.document)} · P${Number(source.page)} · ${esc(source.title)}</button>`).join('')}</div></details>`:'');
+    else if (row.status==='error') html+=`<p class="error-text">${esc(row.error)}</p><p class="helper">请检查模型设置后重试；已生成的其他日期不受影响。</p>`;
+  }
+  if (queued || row?.status==='running') html+='<p class="helper" role="status">正在排队或生成，完成后会自动显示。可以离开此页，稍后回顾。</p>';
+  if ($('#daily-content').innerHTML!==html) $('#daily-content').innerHTML=html;
+}
+async function loadDailySummaries() {
+  const request=++dailyRequest;
+  const selected=dailySelected;
+  const date=!selected && dailyDateChosen?$('#daily-date').value:'';
+  const data=await api('/api/daily-summaries'+(date?'?date='+encodeURIComponent(date):''));
+  const row=selected?await api('/api/daily-summaries/'+selected):data.selected;
+  if (request!==dailyRequest || state.view!=='report') return;
+  $('#daily-date').value=selected?row.study_date:(date || data.yesterday);
+  $('#daily-date').max=data.yesterday;
+  const config=state.app?.settings || {};
+  $('#daily-schedule').textContent=(config.daily_summary_enabled?`每天 ${config.daily_summary_time} 自动整理前一天`:'自动总结未开启，可在“连接与设置”中开启')+` · ${data.timezone}`;
+  const options='<option value="">最近 60 份总结</option>'+data.items.map(item=>`<option value="${Number(item.id)}">${esc(item.study_date)} · ${esc(item.timezone)} · ${esc(dailyLabels[item.status])}</option>`).join('');
+  if ($('#daily-history').innerHTML!==options) $('#daily-history').innerHTML=options;
+  $('#daily-history').value=String(dailySelected || data.selected?.id || '');
+  const queued=state.app?.jobs?.some(item=>item.kind==='daily_summary' && ['queued','running'].includes(item.status));
+  renderDailySummary(row,queued && !['ready','empty'].includes(row?.status));
 }
 
 document.addEventListener('click', async event => {
@@ -406,6 +455,15 @@ document.addEventListener('click', async event => {
     }
     if (button.dataset.pull) return await job(`/api/documents/${button.dataset.pull}/pull`);
     switch (button.dataset.action) {
+      case 'daily-yesterday': dailySelected=null; dailyDateChosen=false; return await loadDailySummaries();
+      case 'generate-daily': {
+        const date=$('#daily-date').value;
+        if (!date) throw new Error('请选择学习日期');
+        $('#generate-daily').disabled=true;
+        try { await job('/api/daily-summaries/generate',{date,...(dailyZone?{timezone:dailyZone}:{})}); }
+        finally { await loadDailySummaries(); }
+        return;
+      }
       case 'sync':
         if (!state.app?.settings.sync_folders?.length) { toast('请先选择同步文件夹'); return await changeView('files'); }
         return await job('/api/sync');
@@ -461,6 +519,12 @@ document.addEventListener('submit', async event => {
 });
 document.addEventListener('change', async event => {
   try {
+    if (event.target.id==='daily-date') { dailySelected=null; dailyDateChosen=true; return await loadDailySummaries(); }
+    if (event.target.id==='daily-history') {
+      dailySelected=Number(event.target.value) || null;
+      dailyDateChosen=false;
+      return await loadDailySummaries();
+    }
     if (event.target.dataset.fileSelect) {
       if (event.target.checked) state.fileSelection.add(event.target.dataset.fileSelect);
       else state.fileSelection.delete(event.target.dataset.fileSelect);
@@ -500,6 +564,9 @@ document.addEventListener('keydown',event=>{
   const step={j:1,k:-1}[event.key];
   if (step) { event.preventDefault(); moveNote(step).catch(error=>toast(error.message,true)); }
 });
-document.addEventListener('visibilitychange',()=>markCurrentNoteRead().catch(error=>toast(error.message,true)));
+document.addEventListener('visibilitychange',async()=>{
+  try { await recordCurrentView(); await markCurrentNoteRead(); }
+  catch(error) { toast(error.message,true); }
+});
 $('#file-search').addEventListener('input',renderFiles);
 (async function poll(){await refreshState();setTimeout(poll,document.hidden?20000:4000);})();

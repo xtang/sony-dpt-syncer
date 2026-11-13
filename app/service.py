@@ -19,10 +19,12 @@ from .note_scope import SCOPE_VERSION, recognition_scope, normalize_ref, normali
 from .store import Store, encode, now
 from .scope import folder_path, in_folders, normalize_folders
 from .paths import ROOT, database_path
+from .daily_summary import DailySummaries, summary_zone
 
 DEFAULTS = dict(device_address="", sync_clock=True, auto_sync=True,
                 sync_interval=180, auto_analyze=True, model_base_url="", model_name="",
-                model_api_key="", upload_folder="Document/收件箱", sync_folders=[], last_sync=None)
+                model_api_key="", upload_folder="Document/收件箱", sync_folders=[], last_sync=None,
+                daily_summary_enabled=False, daily_summary_time="05:00", daily_summary_timezone="Asia/Shanghai")
 ANALYSIS_FIELDS = ("content_hash", "snapshot_id", "ignore_version", "transcript", "question", "anchor", "kind", "question_refs", "scope_status", "scope_version", "manual_transcript", "confirmation_stale")
 
 
@@ -56,6 +58,7 @@ class Service:
         self.store = Store(database_path(self.data))
         self.device = DeviceClient(self.settings, auth_dir, relay)
         self.model = ModelClient(self.settings)
+        self.daily = DailySummaries(self)
         self.tasks = queue.Queue()
         self.model_tasks = queue.Queue()
         self.note_lock = threading.RLock()
@@ -97,7 +100,11 @@ class Service:
             values["sync_folders"] = normalize_folders(values["sync_folders"])
         if "upload_folder" in values:
             values["upload_folder"] = folder_path(values["upload_folder"])
-        for key in ("auto_sync", "sync_clock", "auto_analyze"):
+        if "daily_summary_time" in values and (not isinstance(values['daily_summary_time'], str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', values['daily_summary_time'])):
+            raise ValueError('每日总结时间需要使用 HH:MM 格式')
+        if "daily_summary_timezone" in values:
+            summary_zone(values['daily_summary_timezone'])
+        for key in ("auto_sync", "sync_clock", "auto_analyze", "daily_summary_enabled"):
             if key in values and not isinstance(values[key], bool):
                 raise ValueError("开关设置需要布尔值")
         for key in ("model_name", "model_api_key", "model_base_url", "upload_folder"):
@@ -206,12 +213,14 @@ class Service:
 
     def enqueue(self, kind, argument=None):
         key = (kind, str(argument) if kind in ("analyze", "pull", "upload", "mkdir") else "")
+        if kind == 'daily_summary':
+            key = (kind, argument['day']+'|'+argument['zone'])
         with self.pending_lock:
             if key in self.pending:
                 return {"queued": False, "message": "同一任务正在处理中"}
             job = self.store.job(kind)
             self.pending.add(key)
-            work_queue = self.model_tasks if kind in ("analyze", "model_test") else self.tasks
+            work_queue = self.model_tasks if kind in ("analyze", "model_test", "daily_summary") else self.tasks
             work_queue.put((job, kind, argument, key))
         return {"queued": True, "job_id": job}
 
@@ -219,6 +228,15 @@ class Service:
         threading.Thread(target=self._worker, args=(self.tasks,), daemon=True, name="dpt-device").start()
         threading.Thread(target=self._worker, args=(self.model_tasks,), daemon=True, name="dpt-model").start()
         threading.Thread(target=self._scheduler, daemon=True, name="dpt-sync").start()
+        threading.Thread(target=self._daily_scheduler, daemon=True, name="daily-summary").start()
+
+    def _daily_scheduler(self):
+        while not self.stop_event.is_set():
+            try:
+                self.daily.tick()
+            except Exception as error:
+                self.store.event('error', '每日总结调度失败：'+self.safe_error(error))
+            self.stop_event.wait(30)
 
     def _scheduler(self):
         # Wait before the first poll so settings and imported notes are available immediately.
@@ -255,6 +273,8 @@ class Service:
                         raise RuntimeError("DPT 无回应，请唤醒设备并检查 Wi-Fi / IP")
                 elif kind == "model_test":
                     result = self.model.test()
+                elif kind == "daily_summary":
+                    result = self.daily.generate(**argument)
                 elif kind == "pair":
                     result = self.pair(job)
                 else:
@@ -672,7 +692,8 @@ class Service:
                     limitation="回顾仅统计可信的批注修改记录，不推断阅读时长、任务完成或知识掌握程度。异常日期的历史笔记不归入本期。")
 
     def export(self):
-        return dict(exported_at=now(), notes=self.store.notes(include_ignored=True), report=self.report())
+        return dict(exported_at=now(), notes=self.store.notes(include_ignored=True), report=self.report(),
+                    daily_summaries=[self.daily.public(row) for row in self.store.query('SELECT * FROM daily_summaries ORDER BY study_date DESC')])
 
     def state(self):
         return dict(stats=self.store.stats(), settings=self.public_settings(), online=self.online,

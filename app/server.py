@@ -214,6 +214,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(self.service.folders())
             if path == "/api/report":
                 return self.json(self.service.report(max(1, min(365, int(query.get("days", [7])[0])))))
+            if path == '/api/daily-summaries':
+                return self.json(self.service.daily.listing(query.get('date', [None])[0]))
+            match = re.fullmatch(r'/api/daily-summaries/(\d+)(/download)?', path)
+            if match:
+                row = self.service.store.one('SELECT * FROM daily_summaries WHERE id=?', (int(match[1]),))
+                if not row:
+                    raise FileNotFoundError('总结不存在')
+                if match[2]:
+                    if row['status'] not in ('ready', 'empty'):
+                        raise ValueError('总结尚未生成完成')
+                    return self.send_bytes(row['markdown'].encode(), 'text/markdown; charset=utf-8',
+                                           attachment='study-summary-'+row['study_date']+'.md')
+                return self.json(self.service.daily.public(row))
             if path == "/api/export.json":
                 result = self.service.export()
                 result["notes"] = [public_note(note) for note in result["notes"]]
@@ -293,6 +306,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(self.service.enqueue(*simple_jobs[path]), 202)
         if path == "/api/settings":
             return self.json(self.service.save_settings(body))
+        if path == '/api/daily-summaries/generate':
+            zone = body.get('timezone', self.service.settings()['daily_summary_timezone'])
+            day = self.service.daily.validate(body.get('date'), zone)
+            return self.json(self.service.enqueue('daily_summary', dict(day=day, zone=zone)), 202)
         if path == "/api/folders/create":
             from .scope import folder_path
             return self.json(self.service.enqueue("mkdir", folder_path(body.get("path"))), 202)
@@ -302,11 +319,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/device/pin":
             self.service.submit_pin(body.get("pin", ""))
             return self.json({"ok": True})
-        match = re.fullmatch(r"/api/notes/(\d+)/(edit|analyze|read|ignore)", path)
+        match = re.fullmatch(r"/api/notes/(\d+)/(edit|analyze|read|ignore|view)", path)
         if match:
             identifier, action = int(match[1]), match[2]
             if not self.service.store.note(identifier):
                 raise FileNotFoundError("笔记不存在")
+            if action == 'view':
+                self.service.store.record_note_view(identifier)
+                return self.json({'ok': True})
             if action == "edit":
                 return self.json(public_note(self.service.edit_note(identifier, body)))
             if action == "ignore":

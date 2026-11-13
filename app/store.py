@@ -77,6 +77,19 @@ CREATE INDEX IF NOT EXISTS annotations_document ON annotations(document_id);
 CREATE TABLE IF NOT EXISTS folders (
  path TEXT PRIMARY KEY, entry_id TEXT, last_seen TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS note_views (
+ note_id INTEGER NOT NULL REFERENCES notes(id), viewed_at TEXT NOT NULL,
+ PRIMARY KEY(note_id,viewed_at)
+);
+CREATE INDEX IF NOT EXISTS note_views_time ON note_views(viewed_at);
+CREATE TABLE IF NOT EXISTS daily_summaries (
+ id INTEGER PRIMARY KEY, study_date TEXT NOT NULL, timezone TEXT NOT NULL,
+ status TEXT NOT NULL, note_count INTEGER NOT NULL DEFAULT 0,
+ sources TEXT NOT NULL DEFAULT '[]', markdown TEXT NOT NULL DEFAULT '',
+ model TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+ attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(study_date,timezone)
+);
 """
 
 
@@ -107,6 +120,7 @@ class Store:
                     db.execute(f"ALTER TABLE notes ADD COLUMN {name} {declaration}")
             db.execute("UPDATE notes SET activity_at=COALESCE((SELECT created_at FROM answers WHERE id=notes.answer_id),first_seen) WHERE activity_at IS NULL")
             db.execute("UPDATE jobs SET status='interrupted',message='上次运行中断，可重新同步',updated_at=? WHERE status IN ('queued','running','waiting_pin')", (now(),))
+            db.execute("UPDATE daily_summaries SET status='error',error='生成中断，可重试',updated_at=? WHERE status='running'", (now(),))
 
     @contextmanager
     def db(self):
@@ -236,9 +250,17 @@ class Store:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             condition = "document_id=? AND archived=0 AND ignored=0 AND unread=1 AND answer_id IN ("+placeholders+")"
-            rows = db.execute("SELECT answer_id FROM notes WHERE "+condition, (document_id,*answer_ids)).fetchall()
+            rows = db.execute("SELECT id,answer_id FROM notes WHERE "+condition, (document_id,*answer_ids)).fetchall()
             db.execute("UPDATE notes SET unread=0 WHERE "+condition, (document_id,*answer_ids))
+            for row in rows:
+                db.execute("INSERT OR IGNORE INTO note_views(note_id,viewed_at) VALUES(?,?)", (row['id'],now()))
         return [row["answer_id"] for row in rows]
+
+    def record_note_view(self, identifier):
+        # Minute granularity coalesces duplicate browser requests without losing date boundaries.
+        stamp = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+        self.execute("""INSERT OR IGNORE INTO note_views(note_id,viewed_at)
+            SELECT id,? FROM notes WHERE id=? AND archived=0 AND ignored=0""", (stamp, identifier))
 
     @staticmethod
     def decode_note(row):

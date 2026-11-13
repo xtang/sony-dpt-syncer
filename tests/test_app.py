@@ -176,9 +176,10 @@ class SyncerCase(unittest.TestCase):
         status,body=self.request('/',host='192.0.2.10:4387')
         self.assertEqual(status,200)
         self.assertIn('访问口令'.encode(),body)
-        for path in ['/api/state','/api/notes','/api/channels','/api/folders','/api/export.json','/api/backup.sqlite3','/app.js']:
+        for path in ['/api/state','/api/notes','/api/channels','/api/folders','/api/export.json','/api/backup.sqlite3','/app.js','/api/daily-summaries','/api/daily-summaries/1/download']:
             self.assertEqual(self.request(path,host='192.0.2.10:4387')[0],401)
         self.assertEqual(self.request('/api/sync','POST',host='192.0.2.10:4387')[0],401)
+        self.assertEqual(self.request('/api/daily-summaries/generate','POST',{'date':'2020-04-01'},host='192.0.2.10:4387')[0],401)
         self.assertEqual(self.service.store.query('SELECT * FROM jobs'),[])
 
     def test_web_login_session_cookie_and_logout(self):
@@ -790,6 +791,26 @@ class SyncerCase(unittest.TestCase):
                 self.assertEqual(status,200)
                 self.assertIn('Content-Type: image/svg+xml',self.last_headers)
                 self.assertIn(b'<svg',body)
+
+    def test_daily_summary_api_download_and_view_tracking(self):
+        identifier=self.ingest()['notes'][0]
+        self.assertEqual(self.request(f'/api/notes/{identifier}/view','POST',{})[0],200)
+        self.assertEqual(self.service.store.one('SELECT note_id FROM note_views')['note_id'],identifier)
+        self.assertEqual(self.request('/api/daily-summaries?date=bad')[0],400)
+        self.assertEqual(self.request('/api/daily-summaries/generate','POST',{'date':'2999-01-01'})[0],400)
+        self.assertEqual(self.request('/api/daily-summaries/generate','POST',{'date':'2020-04-01'})[0],202)
+        self.assertEqual(self.service.model_tasks.qsize(),1)
+        _,kind,args,_=self.service.model_tasks.get_nowait()
+        self.assertEqual(kind,'daily_summary')
+        summary=self.service.daily.generate(**args)['summary_id']
+        status,payload=self.request('/api/daily-summaries?date=2020-04-01')
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(payload)['selected']['id'],summary)
+        status,body=self.request(f'/api/daily-summaries/{summary}/download')
+        self.assertEqual(status,200)
+        self.assertIn('attachment; filename="study-summary-2020-04-01.md"',self.last_headers)
+        self.assertIn('未调用 AI'.encode(),body)
+        self.assertEqual(self.request('/api/daily-summaries/99999')[0],404)
 
     def test_upload_rejects_invalid_pdf_and_only_queues_valid_file(self):
         self.assertEqual(self.request('/api/upload','POST',raw=b'not a PDF',filename='test.pdf')[0],400)

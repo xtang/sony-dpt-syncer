@@ -18,6 +18,7 @@ Sync documents and annotations from your reader, turn handwritten questions into
 - **Review exercise answers.** Circled choices and handwritten answers can receive explanations, corrections, and relevant knowledge points. Uncertain handwriting or conflicting question claims wait for review.
 - **Keep notes continuous.** Adding strokes preserves the note’s identity. Splits and merges retain history; changed, manually confirmed text requires reconfirmation instead of being overwritten.
 - **Organize and archive.** Create device folders, move PDFs with backup and read-back verification, ignore notes without deleting them, and export Markdown, JSON, or a database backup.
+- **Review yesterday’s learning.** Enable a daily AI summary at a configurable time (default 05:00, Asia/Shanghai). Summaries are saved in the database, available by date, and downloadable as Markdown. Automatic summaries are off by default.
 
 ## A closer look
 

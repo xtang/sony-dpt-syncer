@@ -103,6 +103,26 @@ assert.equal(element('#unread-badge').hidden,true);
 assert.equal(context.document.title,'墨记 · 文档与笔记助手');
 assert.equal(element('#tab-icon').href,'/favicon.svg');
 
+// Saved daily summaries render untrusted model text safely and retain download/history controls.
+for (const name of ['daily_summary_enabled','daily_summary_time','daily_summary_timezone']) assert(html.includes(`name="${name}"`));
+context.summaryFixture={id:7,study_date:'2020-04-01',timezone:'Asia/Shanghai',note_count:1,status:'ready',
+  markdown:'# Summary\n\n<script>bad()</script>\n\n- a\n- b',sources:[{id:1,document:'<img src=x>',page:2,title:'note'}]};
+run('renderDailySummary(summaryFixture)');
+assert(element('#daily-content').innerHTML.includes('/api/daily-summaries/7/download'));
+assert(element('#daily-content').innerHTML.includes('&lt;script&gt;'));
+assert(!element('#daily-content').innerHTML.includes('<script>'));
+assert(!element('#daily-content').innerHTML.includes('<img src=x>'));
+assert(element('#generate-daily').disabled);
+run('renderDailySummary({...summaryFixture,status:"error",error:"<img src=x>"})');
+assert(!element('#generate-daily').disabled);
+assert(element('#daily-content').innerHTML.includes('&lt;img'));
+assert.equal(element('#generate-daily').textContent,'重试这一天的总结');
+run('renderDailySummary(null,true)');
+assert(element('#generate-daily').disabled);
+assert(element('#daily-content').innerHTML.includes('正在排队或生成'));
+run('renderDailySummary(null)');
+assert(!element('#generate-daily').disabled);
+
 // PDF tree: document rows, unread/count pills, nested notes, loading state.
 context.sampleChannels=[{id:'a'.repeat(24),title:'系统设计 <img src=x>',remote_path:'Document/design.pdf',notes:3,unread:2,needs_review:1,last_activity:'2026-11-12T10:00:00Z',last_snippet:'接口与实现片段'},
   {id:'b'.repeat(24),title:'阅读材料',remote_path:'Document/book.pdf',notes:1,unread:0,needs_review:0,last_activity:'2026-11-11T10:00:00Z',last_snippet:'标记内容'}];
@@ -184,6 +204,20 @@ assert.equal(elements.get('#bulk-bar').hidden,true,'bulk bar hides without a sel
 assert.equal(elements.get('#move-files-button').disabled,true);
 
 (async()=>{
+  let yesterday='2020-04-01';
+  context.dailyApi=async()=>({items:[],selected:null,yesterday,timezone:'Asia/Shanghai'});
+  run('api=dailyApi;state.view="report";state.app={settings:{daily_summary_enabled:false},jobs:[]}');
+  await run('loadDailySummaries()');
+  assert.equal(element('#daily-date').value,'2020-04-01');
+  yesterday='2020-04-02';
+  await run('loadDailySummaries()');
+  assert.equal(element('#daily-date').value,'2020-04-02','default review follows yesterday across midnight');
+  element('#daily-date').value='2020-03-30';
+  await listeners.get('change')({target:{id:'daily-date'}});
+  yesterday='2020-04-03';
+  await run('loadDailySummaries()');
+  assert.equal(element('#daily-date').value,'2020-03-30','explicit historical date stays selected');
+  run('state.view="notes";dailyDateChosen=false');
   const requests=[];
   const entries=[{...context.sampleNote,title:'First document note'},
     {...context.sampleNote,id:10,answer_id:10,title:'Another unread note'},
@@ -192,6 +226,7 @@ assert.equal(elements.get('#move-files-button').disabled,true);
   const copy=value=>JSON.parse(JSON.stringify(value));
   context.integrationApi=async(path,body)=>{
     requests.push({path,body});
+    if (/\/view$/.test(path)) return {ok:true};
     if (/\/ignore$/.test(path)) {
       const id=Number(path.split('/')[3]);const note=entries.find(item=>item.id===id);note.ignored=Number(body.ignored);note.unread=0;return copy(note);
     }

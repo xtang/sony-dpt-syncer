@@ -53,7 +53,20 @@
     </section>
     <section id="view-report" class="view" hidden>
       <div class="view-bar"><p class="subtitle">按时间范围汇总同步范围内的笔记。</p><div class="row"><select id="report-days" aria-label="回顾时间范围"><option value="1">最近 24 小时</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option></select><button class="button quiet small" data-action="print">打印 / 存为 PDF</button></div></div>
-      <div id="report-content" class="view-body"></div>
+      <div class="view-body">
+        <section class="surface report-card daily-card" aria-labelledby="daily-heading">
+          <h2 id="daily-heading">每日学习总结</h2>
+          <p id="daily-schedule" class="helper"></p>
+          <div class="row wrap daily-controls">
+            <label>学习日期<input id="daily-date" type="date"></label>
+            <button class="button quiet" data-action="daily-yesterday">回顾昨天</button>
+            <button class="button primary" data-action="generate-daily" id="generate-daily">生成这一天的总结</button>
+            <label>历史总结<select id="daily-history" aria-label="历史总结"><option value="">最近 60 份总结</option></select></label>
+          </div>
+          <div id="daily-content" aria-live="polite"><p class="helper">正在读取总结…</p></div>
+        </section>
+        <div id="report-content"></div>
+      </div>
     </section>
     <section id="view-settings" class="view" hidden>
       <div class="view-body">
@@ -61,6 +74,7 @@
           <section class="surface settings-card"><h2>Digital Paper</h2><label>DPT 的 IP 地址<input name="device_address" required placeholder="阅读器 IP 地址或主机名"></label><label>发送 PDF 的目录<input name="upload_folder" placeholder="Document/收件箱"></label><label class="check-label"><input name="sync_clock" type="checkbox">连接时校对设备时间</label><div class="row wrap"><button class="button quiet" type="button" data-action="probe">检查连接</button><button class="button quiet" type="button" data-action="pair">重新配对</button><span id="paired-label" class="muted"></span></div><div id="pin-box" class="pin-box" hidden><p>请查看 DPT 屏幕上显示的配对码。</p><div class="row"><input id="pair-pin" inputmode="numeric" autocomplete="off" placeholder="输入配对码" aria-label="配对码"><button class="button primary" type="button" data-action="pin">完成配对</button></div></div></section>
           <section class="surface settings-card"><h2>模型</h2><p class="helper">使用支持图片输入的 OpenAI 兼容接口。解读时会向该服务发送笔迹截图、所在页的文字和相关笔记。</p><label>API Base URL<input name="model_base_url" type="url" placeholder="https://你的服务地址/v1" autocomplete="off"></label><label>模型名称<input name="model_name" placeholder="填写服务提供的视觉模型名称" autocomplete="off"></label><label>API Key<input name="model_api_key" type="password" placeholder="可选；留空保留已保存的密钥" autocomplete="off"></label><label class="check-label"><input name="clear_api_key" type="checkbox">清除已保存的密钥</label><div class="row wrap"><button class="button quiet" type="button" data-action="model-test">保存并测试接口</button><span id="key-state" class="muted"></span></div></section>
           <section class="surface settings-card"><h2>同步与解读</h2><label class="check-label"><input name="auto_sync" type="checkbox">设备在线时自动检查笔记变动</label><label>检查间隔<select name="sync_interval"><option value="60">每 1 分钟</option><option value="180">每 3 分钟</option><option value="300">每 5 分钟</option><option value="600">每 10 分钟</option></select></label><label class="check-label"><input name="auto_analyze" type="checkbox">同步后自动识别并解读新笔记</label><p class="helper">设备休眠时会等待下次检查。识别不确定的笔迹会留在“待确认”，等待你核对后再继续解读。关闭自动解读时，你可以逐条选择解读。</p></section>
+          <section class="surface settings-card"><h2>每日学习总结</h2><label class="check-label"><input name="daily_summary_enabled" type="checkbox">每天自动生成 AI 学习总结</label><label>生成时间<input name="daily_summary_time" type="time" value="05:00" required></label><label>时区<input name="daily_summary_timezone" value="Asia/Shanghai" placeholder="Asia/Shanghai" required></label><p class="helper">默认每天 05:00 整理前一天 00:00–24:00 的笔记。包括同步范围内当天修改的批注和在网页查看的笔记，不代表已掌握。</p><p class="helper">使用上方配置的模型，将转写与解答发送给模型服务。总结保存在数据库，在“笔记回顾”查看或下载 Markdown。关闭开关后仍可手动生成，已有总结会保留。</p></section>
           <section class="surface settings-card"><h2>数据与备份</h2><p class="helper">同步、批注提取、去重、归档、搜索和统计由服务器程序完成。手写识别、意图理解和问题解答使用模型。没有配置模型时，仍可同步、查看和导出笔记。</p><div class="row wrap"><a class="button quiet" href="/api/export.json" download>导出 JSON</a><a class="button quiet" href="/api/export.md" download>导出 Markdown</a><a class="button quiet" href="/api/backup.sqlite3" download>备份数据库</a></div><p class="helper">数据库备份包含文字与解答；完整备份还需要服务器上的 PDF 和笔迹截图。密钥单独保存在服务器私有设置文件。</p></section>
           <div class="settings-footer"><button class="button primary" type="submit">保存设置</button><span id="settings-feedback" class="muted" role="status"></span><button class="button quiet" type="button" data-action="logout" hidden>退出登录</button></div>
         </form>

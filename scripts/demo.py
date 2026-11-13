@@ -138,7 +138,7 @@ def seed(data, font):
 
 class DemoHandler(Handler):
     def post(self,path):
-        if re.fullmatch(r'/api/(?:notes/\d+/(?:read|edit|ignore)|documents/[a-f0-9]{24}/read)',path):
+        if re.fullmatch(r'/api/(?:notes/\d+/(?:read|edit|ignore|view)|documents/[a-f0-9]{24}/read)',path):
             return super().post(path)
         self.json_body()
         return self.json({'error':'演示模式：设备连接、上传和模型调用已禁用。'},400)

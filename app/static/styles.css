@@ -276,6 +276,15 @@ td .row { gap: 6px; }
 .stat span { font-size: 12px; color: var(--muted); }
 .report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .report-card { padding: 18px 20px; }
+.daily-card { margin-bottom: 24px; }
+.daily-controls { align-items: end; gap: 12px; margin: 18px 0; }
+.daily-controls label { display: grid; gap: 6px; font-size: 13px; min-width: 0; }
+.daily-controls select { max-width: 100%; }
+.daily-markdown { max-width: 900px; line-height: 1.85; overflow-wrap: anywhere; margin: 20px 0; }
+.daily-markdown h3 { margin: 24px 0 10px; }
+.daily-markdown p { margin: 10px 0; }
+.daily-sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.daily-sources button { white-space: normal; text-align: left; }
 .topic-row { display: flex; justify-content: space-between; padding: 9px 0; border-top: 1px solid var(--hair); font-size: 13px; }
 .topic-row span:last-child { color: var(--muted); }
 .next-step { display: flex; align-items: baseline; gap: 12px; padding: 10px 0; border-top: 1px solid var(--hair); }
