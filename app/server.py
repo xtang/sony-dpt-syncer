@@ -172,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                 except PermissionError as error:
                     return self.json({"error": str(error)}, 401)
                 return self.send_bytes(b'{"ok":true}', extra_headers={"Set-Cookie": self.web_auth.cookie(token)})
-            if not mutation and path in ("/login.js", "/styles.css"):
+            if not mutation and path in ("/login.js", "/styles.css", "/favicon.svg", "/favicon-unread.svg"):
                 return self.file(STATIC/path[1:])
             if not authenticated:
                 if not mutation and path in ("/", "/index.html"):

@@ -14,7 +14,7 @@ const element = selector => {
 };
 const listeners=new Map();
 const context = vm.createContext({
-  document:{querySelector:element,querySelectorAll(){return [];},addEventListener(name,handler){listeners.set(name,handler);},createElement(){return {remove(){}};},hidden:false},
+  document:{title:'墨记 · 文档与笔记助手',querySelector:element,querySelectorAll(){return [];},addEventListener(name,handler){listeners.set(name,handler);},createElement(){return {remove(){}};},hidden:false},
   fetch:()=>new Promise(()=>{}), // Startup polling must never access any real service.
   setTimeout(){},clearTimeout(){},console,URL,FormData:class {},window:{print(){}}
 });
@@ -88,11 +88,20 @@ assert.equal(element('#count-needs_review').textContent,'2');
 assert.equal(element('#count-ignored').textContent,'4');
 assert.equal(element('#unread-badge').hidden,false);
 assert.equal(element('#unread-badge').textContent,3);
+assert.equal(context.document.title,'(3) 墨记 · 文档与笔记助手');
+assert.equal(element('#tab-icon').href,'/favicon-unread.svg');
+context.document.hidden=true;
+run('renderStats({notes:128,unread:105})');
+assert.equal(context.document.title,'(105) 墨记 · 文档与笔记助手','background tabs show the global unread count');
+assert.equal(element('#tab-icon').href,'/favicon-unread.svg');
+context.document.hidden=false;
 run('renderStats({notes:0,unread:0,pending:0,needs_review:0,ignored:0})');
 assert.equal(element('#count-all').textContent,'0','the “all” count is always shown');
 assert.equal(element('#count-unread').textContent,'');
 assert(!element('#count-unread').classList.contains('hot'));
 assert.equal(element('#unread-badge').hidden,true);
+assert.equal(context.document.title,'墨记 · 文档与笔记助手');
+assert.equal(element('#tab-icon').href,'/favicon.svg');
 
 // PDF tree: document rows, unread/count pills, nested notes, loading state.
 context.sampleChannels=[{id:'a'.repeat(24),title:'系统设计 <img src=x>',remote_path:'Document/design.pdf',notes:3,unread:2,needs_review:1,last_activity:'2026-11-12T10:00:00Z',last_snippet:'接口与实现片段'},
@@ -265,9 +274,14 @@ assert.equal(elements.get('#move-files-button').disabled,true);
   await click({noteMode:'documents'});
   await click({channel:'b'.repeat(24)});
   assert.equal(entries[3].unread,1,'hidden pages send no read receipt');
+  run('state.app={stats:{unread:1}};renderStats(state.app.stats)');
+  assert.equal(element('#tab-icon').href,'/favicon-unread.svg');
   context.document.hidden=false;
   await listeners.get('visibilitychange')();
   assert.equal(entries[3].unread,0);
+  assert.equal(context.document.title,'墨记 · 文档与笔记助手','reading the last reply clears the tab count immediately');
+  assert.equal(element('#tab-icon').href,'/favicon.svg');
+  run('state.app=null');
   assert.equal(requests.at(-1).body.answer_id,99);
   await click({filter:'ignored'});
   workspace.classList.remove('show-detail');

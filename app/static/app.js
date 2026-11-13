@@ -1,6 +1,8 @@
 'use strict';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+const baseTabTitle = document.title;
+let tabUnread = null;
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = { view: 'notes', filter: 'all', notes: [], selected: null, detail: null, app: null, files: [], fileSelection: new Set(), folders: [], folderDraft: [], folderDirty: false, editing: false, seenJobs: new Set(), initialized: false, searchRequest: 0 };
 Object.assign(state,{noteMode:'documents',channels:[],channel:null,channelRequest:0,detailRequest:0,historyAnswer:null,reading:new Set(),notesFor:null,collapsedChannel:null,navHTML:''});
@@ -36,7 +38,16 @@ function badge(note) {
   return `<span class="badge ${style}">${esc(statusLabels[note.status] || note.status)}</span>`;
 }
 function stat(number, label) { return `<div class="stat"><strong>${esc(number)}</strong><span>${esc(label)}</span></div>`; }
+function renderTabUnread(value) {
+  const number = Number(value);
+  const unread = Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+  if (unread === tabUnread) return;
+  tabUnread = unread;
+  document.title = unread ? `(${unread}) ${baseTabTitle}` : baseTabTitle;
+  $('#tab-icon').href = unread ? '/favicon-unread.svg' : '/favicon.svg';
+}
 function renderStats(counts) {
+  renderTabUnread(counts.unread);
   for (const [filter,key] of [['all','notes'],['unread','unread'],['pending','pending'],['needs_review','needs_review'],['ignored','ignored']]) {
     const value=Number(counts[key])||0, item=$('#count-'+filter);
     item.textContent=filter==='all' || value ? String(value) : '';

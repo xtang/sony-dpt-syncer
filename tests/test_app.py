@@ -782,6 +782,15 @@ class SyncerCase(unittest.TestCase):
                 self.assertTrue(body)
         self.assertNotIn(str(self.service.data).encode(),self.request('/api/notes')[1])
 
+    def test_tab_icons_are_served_as_svg_without_login(self):
+        self.enable_web_auth()
+        for path in ['/favicon.svg', '/favicon-unread.svg']:
+            with self.subTest(path=path):
+                status,body=self.request(path)
+                self.assertEqual(status,200)
+                self.assertIn('Content-Type: image/svg+xml',self.last_headers)
+                self.assertIn(b'<svg',body)
+
     def test_upload_rejects_invalid_pdf_and_only_queues_valid_file(self):
         self.assertEqual(self.request('/api/upload','POST',raw=b'not a PDF',filename='test.pdf')[0],400)
         status,body=self.request('/api/upload','POST',raw=self.pdf.read_bytes(),filename='test.pdf')
