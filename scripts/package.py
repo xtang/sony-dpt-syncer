@@ -67,10 +67,11 @@ def package(destination, include_pairing=False):
     release = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     source = destination/"dpt-syncer-code.tar.gz"
     files = application_sources(ROOT)
-    files += [ROOT/p for p in ["Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example", "README.md", "LICENSE", "requirements.txt",
-        "scripts/install_remote.sh", "scripts/repair_report.py", "scripts/repair_notes.py",
+    files += [ROOT/p for p in ["Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example", "README.md", "README.zh-CN.md", "LICENSE", "requirements.txt",
+        "scripts/install_remote.sh", "scripts/demo.py", "scripts/repair_report.py", "scripts/repair_notes.py",
         "scripts/deploy.sh", "scripts/deploy.py", "scripts/package.py", "scripts/open.command", "scripts/start.command",
         "docs/usage.md"]]
+    files += sorted((ROOT/"docs/screenshots").glob("*.png"))
     files += list((ROOT/"tests").glob("test_*.py"))
     files += list((ROOT/"tests").glob("test_*.cjs"))
     build_source_archive(files, source)

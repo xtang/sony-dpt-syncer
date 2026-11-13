@@ -18,6 +18,9 @@
 deviceid.dat
 privatekey.dat
 
+# Browser capture logs
+/.playwright-mcp/
+
 # Python caches and build artifacts
 __pycache__/
 *.py[cod]

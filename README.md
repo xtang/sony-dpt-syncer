@@ -1,53 +1,92 @@
-# 墨记 · DPT 文档与笔记助手
+# Moji (墨记)
 
-面向 Sony Digital Paper 的通用文档工具：按文件夹同步 PDF 与手写批注，结合原文解答笔记，并保留可检索的归档与解读历史。
+**A self-hosted PDF and handwritten-note companion for Sony Digital Paper.**
 
-网页支持新建设备目录与批量移动 PDF；移动前备份、移动后回读校验，并保留原有笔记与解答关联。
+Sync documents and annotations from your reader, turn handwritten questions into contextual explanations, and keep the original ink, transcripts, and answer history together. Moji works with books, study materials, and everyday documents—not just exam papers.
 
-识别到圈选选项或手写解题时，会结合题目核对作答；发现错误则给出错因、解题过程和具体知识点。题目或依据不足时会提示补充。
+**English** · [简体中文](README.zh-CN.md)
 
-## 核心流程
+![Reading notes with the original annotation, transcript, and explanation side by side](docs/screenshots/reading-notes.png)
 
-1. 在网页“设备文件”中刷新目录，选择一个或多个同步文件夹并保存。
-2. 所选目录及子目录中的 PDF 自动加入同步，后续新放入的文档也会加入。
-3. 同步新增或变化的批注，查看原始笔迹、校正转写、解读问题。
-4. 范围外的文档不会下载、提取笔记或进入自动解读；已经归档的内容继续保留。
+*The screenshots use fictional documents, simulated annotations, and sample answers. The application interface is currently in Chinese.*
 
-笔记默认按“PDF → 笔记 → 正文”分层浏览，每份文档显示未读回复和最新动态，也可切换为按时间浏览。无须处理的笔记可一键忽略，在“已忽略”中恢复；忽略会保留归档并暂停自动解读。
+## What you can do
 
-## 运行与部署
+- **Choose what to sync.** Select folders and include their subfolders. New PDFs in those folders are picked up automatically.
+- **Read notes in context.** Browse by PDF or timeline, search notes and answers, and inspect the original annotation next to its transcript.
+- **Keep recognition focused.** Model images isolate the current note’s strokes; a marked, annotation-free page supplies the surrounding text.
+- **Review exercise answers.** Circled choices and handwritten answers can receive explanations, corrections, and relevant knowledge points. Uncertain handwriting or conflicting question claims wait for review.
+- **Keep notes continuous.** Adding strokes preserves the note’s identity. Splits and merges retain history; changed, manually confirmed text requires reconfirmation instead of being overwritten.
+- **Organize and archive.** Create device folders, move PDFs with backup and read-back verification, ignore notes without deleting them, and export Markdown, JSON, or a database backup.
 
-需要 Python 3.10+ 和 Poppler 的 `pdftoppm`。模型服务须支持图片输入及 OpenAI 兼容接口。
+## A closer look
+
+### Exercise review
+
+See the selected answer, the suggested answer, and the reasoning behind a correction. Model-derived answers are labeled separately from references found in the document.
+
+![Exercise review showing a circled answer, a correction, and vocabulary notes](docs/screenshots/exercise-review.png)
+
+### Changes that need confirmation
+
+When handwriting changes after a transcript has been confirmed, the previous text and answer remain available. Review the new strokes before continuing; revisions remain accessible in the note.
+
+![A changed note awaiting reconfirmation, with its prior transcript and answer preserved](docs/screenshots/note-history.png)
+
+## Run locally
+
+Requirements: **Python 3.10+**, **Poppler** (`pdftoppm`), and a Sony Digital Paper reader for device sync. To recognize handwriting and generate answers, configure a vision-capable model with an OpenAI-compatible API. Model configuration is optional for sync and browsing.
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r app/requirements.txt
 cp .env.example .env
-# 在 .env 中填写自己的设备地址和部署参数，或启动后在网页配置设备。
 .venv/bin/python -m app.server
 ```
 
-部署到服务器：
+Open **http://localhost:4387**. Configure the reader in **连接与设置** (Connection & settings), complete pairing, then refresh the device directory and select sync folders in **设备文件** (Device files).
+
+Only selected folders are downloaded and analyzed. Existing archives remain available when a folder is removed from the sync scope.
+
+### Try the screenshot demo
+
+No reader, model account, or API key is required:
+
+```sh
+.venv/bin/python scripts/demo.py
+```
+
+Open **http://localhost:4391**. The demo creates three fictional PDFs and nine sample notes in `output/demo`, serves the real interface, and disables device connections, uploads, and model calls. It never loads the project’s `.env` or overwrites an existing non-demo directory.
+
+Rendering the sample documents requires a Chinese/Japanese font. The script looks for common macOS and Noto CJK fonts; use `--font /path/to/font.ttc` if needed. Use `--data output/another-demo` to create a fresh fixture.
+
+## Deploy to your server
+
+The remote host needs Linux, Python 3, Docker, Docker Compose, and SSH access.
 
 ```sh
 bash scripts/deploy.sh user@your-server
-# 或在 .env 中设置 DPT_DEPLOY_HOST 后直接运行：
+# Or set DPT_DEPLOY_HOST in .env:
 bash scripts/deploy.sh
 ```
 
-部署后直接访问脚本输出的局域网网址。设备地址、同步文件夹、模型地址、模型名称、密钥与自动解读开关均可配置。
+The script backs up the database before upgrading and checks service health. Open the LAN address printed after deployment. Reader address, sync folders, model endpoint, credentials, and automatic processing are configurable.
 
-源码不包含预设设备 IP 或服务器地址。`.env`、配对凭据、文档、数据库和部署私有文件均被 Git 忽略。默认打包不会复制配对密钥；如需迁移本机配对，必须显式使用 `--include-pairing`，并只将生成的私有包传给自己的服务器。
+## Data and privacy
 
-完整说明见 [使用与部署](docs/usage.md)。仓库只包含文档同步、批注提取、解读与归档功能。
+PDF snapshots, annotation previews, transcripts, and answers live on your server. Recognition and analysis send the target-note image, page context, and relevant text to the model service you configure. Review important answers against the source material.
 
-## 验证
+The repository contains no preset reader IP or server address. Local `.env` files, pairing credentials, PDFs, databases, and private deployment artifacts are Git-ignored. Packaging excludes pairing keys by default; transferring them requires an explicit `--include-pairing` option.
+
+See the [usage and deployment guide (Chinese)](docs/usage.md) for folder management, backups, note history, and the approval-based historical-repair workflow.
+
+## Checks
 
 ```sh
-python -m unittest discover -s tests -p 'test_*.py' -v
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 node tests/test_frontend.cjs
 ```
 
-## 许可证
+## License
 
-本项目使用 [MIT License](LICENSE)。依赖项目各自的许可证保持不变。
+[MIT](LICENSE). Dependencies retain their respective licenses.
