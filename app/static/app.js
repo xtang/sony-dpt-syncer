@@ -4,7 +4,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const baseTabTitle = document.title;
 let tabUnread = null;
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { view: 'notes', filter: 'all', notes: [], selected: null, detail: null, app: null, files: [], fileSelection: new Set(), folders: [], folderDraft: [], folderDirty: false, editing: false, seenJobs: new Set(), initialized: false, searchRequest: 0 };
+const state = { view: 'notes', filter: 'all', notes: [], selected: null, detail: null, app: null, files: [], fileSelection: new Set(), folders: [], folderDraft: [], folderDirty: false, uploadFolder: null, editing: false, seenJobs: new Set(), initialized: false, searchRequest: 0 };
 Object.assign(state,{noteMode:'documents',channels:[],channel:null,channelRequest:0,detailRequest:0,historyAnswer:null,reading:new Set(),notesFor:null,collapsedChannel:null,navHTML:''});
 try { if (window.localStorage?.getItem('dpt-note-mode')==='timeline') state.noteMode='timeline'; } catch (_) { /* Browser storage is optional. */ }
 const inFolders = (path, folders) => folders.some(root => path === root || path.startsWith(root+'/'));
@@ -358,6 +358,21 @@ function renderFolders() {
   }).join('') || '<p class="helper">先刷新设备目录，或在下面填写文件夹路径。</p>';
   $('#folder-options').innerHTML = state.folders.map(folder=>`<option value="${esc(folder.path)}"></option>`).join('');
   $('#folder-summary').textContent = `${state.folderDraft.length} 个已选目录 · 包含子文件夹${state.folderDirty?' · 尚未保存':''}`;
+  renderUploadFolders();
+}
+// Upload targets follow the saved scope, which the server checks, not the unsaved draft.
+function uploadFolderChoices() {
+  const settings = state.app?.settings || {}, roots = settings.sync_folders || [];
+  const paths = new Set([...roots, ...state.folders.map(folder=>folder.path)]);
+  if (settings.upload_folder) paths.add(settings.upload_folder);
+  return [...paths].filter(path=>inFolders(path,roots)).sort((a,b)=>a.localeCompare(b));
+}
+function renderUploadFolders() {
+  const select = $('#upload-folder'), choices = uploadFolderChoices(), fallback = state.app?.settings.upload_folder;
+  const html = choices.length ? choices.map(path=>`<option value="${esc(path)}">${esc(path)}${path===fallback?'（默认）':''}</option>`).join('') : '<option value="">请先选择同步文件夹</option>';
+  if (select.innerHTML !== html) select.innerHTML = html;
+  select.value = choices.includes(state.uploadFolder) ? state.uploadFolder : choices.includes(fallback) ? fallback : (choices[0] || '');
+  select.disabled = !choices.length;
 }
 async function saveScope() {
   const settings = await api('/api/settings',{sync_folders:state.folderDraft});
@@ -544,13 +559,20 @@ document.addEventListener('change', async event => {
     if (event.target.id==='answer-history') { if (!event.target.value) return await openNote(state.selected); return renderDetail(state.detail, await api('/api/answers/'+event.target.value)); }
     if (event.target.id==='report-days') return await loadReport();
     if (event.target.id==='tracked-only') return renderFiles();
+    if (event.target.id==='upload-folder') { state.uploadFolder=event.target.value; return; }
     if (event.target.id==='pdf-upload') {
       const file = event.target.files[0]; if (!file) return;
-      if (file.size > 128*1024*1024) throw new Error('PDF 大于 128 MB，请拆分后发送');
-      toast('正在向服务器传送 PDF…');
-      const response = await fetch('/api/upload',{method:'POST',headers:{'Content-Type':'application/pdf','X-Filename':encodeURIComponent(file.name)},body:file});
-      const result = await response.json(); if (!response.ok) throw new Error(result.error);
-      toast('文件已加入设备发送队列'); event.target.value=''; await refreshState();
+      const folder = $('#upload-folder').value;
+      // Clear the picker even on failure so choosing the same file again still fires a change.
+      try {
+        if (!folder) throw new Error('请先选择发送到的设备文件夹');
+        if (file.size > 128*1024*1024) throw new Error('PDF 大于 128 MB，请拆分后发送');
+        toast('正在向服务器传送 PDF…');
+        const response = await fetch('/api/upload',{method:'POST',headers:{'Content-Type':'application/pdf','X-Filename':encodeURIComponent(file.name),'X-Folder':encodeURIComponent(folder)},body:file});
+        const result = await response.json(); if (!response.ok) throw new Error(result.error);
+        toast(`文件已加入发送队列，将发送到 ${folder}`);
+      } finally { event.target.value=''; }
+      await refreshState();
     }
   } catch(error) { toast(error.message,true); }
 });

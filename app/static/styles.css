@@ -100,6 +100,9 @@ main { position: relative; margin-left: var(--sidebar-w); height: 100vh; height:
 .view-bar select { padding: 4px 8px; font-size: 12px; }
 .view-body { max-width: 1480px; padding: 20px 20px 48px; }
 .upload-label { cursor: pointer; }
+.upload-bar { gap: 8px; min-width: 0; }
+.upload-target { display: flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; }
+.upload-target select { margin-top: 0; width: auto; max-width: 280px; min-width: 0; text-overflow: ellipsis; }
 
 /* ===== Notes workspace ===== */
 .view-notes { display: flex; flex-direction: column; overflow: hidden; }
@@ -362,6 +365,9 @@ td .row { gap: 6px; }
   .back-button { display: inline-flex; }
   .new-folder { flex-basis: 100%; margin-left: 0; }
   .new-folder input { flex: 1; width: auto; min-width: 0; }
+  .view-bar .upload-bar { flex: 1 1 100%; }
+  .upload-target { flex: 1; }
+  .upload-target select { flex: 1; max-width: none; }
   .bulk-bar input { flex-basis: 100%; max-width: none; }
   .col-optional { display: none; }
   .compact-meta { display: block; }

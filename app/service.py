@@ -259,7 +259,7 @@ class Service:
                 elif kind == "pull":
                     result = self.sync(job, False, only=str(argument))
                 elif kind == "upload":
-                    result = self.upload(argument, job)
+                    result = self.upload(argument["path"], argument["folder"], job)
                 elif kind == "inventory":
                     result = self.refresh_inventory()
                 elif kind == "mkdir":
@@ -623,14 +623,14 @@ class Service:
             self.store.execute("UPDATE notes SET scope_conflicts='[]' WHERE id=?", (note["id"],))
         return conflicts
 
-    def upload(self, path, job=None):
+    def upload(self, path, folder, job=None):
         path = Path(path)
         try:
-            folder = self.settings()["upload_folder"]
+            # The sync scope may have changed while the upload waited in the queue.
             if not self.in_scope(folder):
-                raise ValueError("请先选择同步文件夹，并把上传目录设在同步范围内")
+                raise ValueError("发送目录已不在同步范围内，请重新选择后再发送")
             if job:
-                self.store.update_job(job, message="上传 PDF，同名文件会另存")
+                self.store.update_job(job, message=f"上传 PDF 到 {folder}，同名文件会另存")
             entry = self.device.upload(path, folder)
             identifier = self.upsert_document(entry)
             # Read it back before calling an upload verified.
@@ -640,7 +640,7 @@ class Service:
             snapshot = self.store.one("SELECT s.* FROM snapshots s JOIN documents d ON d.snapshot_id=s.id WHERE d.id=?", (identifier,))
             if not snapshot or snapshot["sha256"] != hashlib.sha256(path.read_bytes()).hexdigest():
                 raise RuntimeError("文件已上传，但设备回读内容发生变化，请在文件列表核对")
-            return {"message": "上传完成，设备回读校验通过", "document_id": identifier}
+            return {"message": f"已发送到 {folder}，设备回读校验通过", "document_id": identifier}
         finally:
             path.unlink(missing_ok=True)
             if path.parent.parent == self.data/"uploads":

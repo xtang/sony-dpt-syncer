@@ -17,7 +17,7 @@ from .bootstrap import relocate
 from .paths import database_path, default_data_dir
 from .service import ROOT, Service
 from .web_auth import WebAuth
-from .scope import in_folders
+from .scope import folder_path, in_folders
 from .env import load_env
 
 STATIC = Path(__file__).parent/"static"
@@ -277,8 +277,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def post(self, path):
         if path == "/api/upload":
-            if not self.service.in_scope(self.service.settings()["upload_folder"]):
+            # A rejection before the body is read would leave PDF bytes on a kept-alive connection.
+            self.close_connection = True
+            if not self.service.settings()["sync_folders"]:
                 raise ValueError("请先在设备文件中选择同步文件夹")
+            requested = self.headers.get("X-Folder")
+            destination = folder_path(unquote(requested)) if requested else self.service.settings()["upload_folder"]
+            if not self.service.in_scope(destination):
+                raise ValueError("发送目录需要位于已选择的同步文件夹内")
             name = Path(unquote(self.headers.get("X-Filename", "upload.pdf"))).name
             if not name.lower().endswith(".pdf") or len(name) > 180 or any(ord(c) < 32 for c in name):
                 raise ValueError("请选择 PDF 文件，文件名不超过 180 个字符")
@@ -297,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
                 target.unlink(missing_ok=True)
                 folder.rmdir()
                 raise ValueError("PDF 无法读取或已加密")
-            return self.json(self.service.enqueue("upload", str(target)), 202)
+            return self.json(self.service.enqueue("upload", {"path": str(target), "folder": destination}), 202)
         body = self.json_body()
         simple_jobs = {"/api/sync": ("sync", True), "/api/device/probe": ("probe", None),
                        "/api/device/inventory": ("inventory", None),
@@ -311,7 +317,6 @@ class Handler(BaseHTTPRequestHandler):
             day = self.service.daily.validate(body.get('date'), zone)
             return self.json(self.service.enqueue('daily_summary', dict(day=day, zone=zone)), 202)
         if path == "/api/folders/create":
-            from .scope import folder_path
             return self.json(self.service.enqueue("mkdir", folder_path(body.get("path"))), 202)
         if path == "/api/documents/move":
             identifiers, destination = self.service.validate_move(body.get("ids"), body.get("folder"))

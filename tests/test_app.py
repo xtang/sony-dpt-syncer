@@ -16,6 +16,7 @@ from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from urllib.parse import quote
 
 import requests
 from pypdf import PdfWriter
@@ -133,7 +134,7 @@ class SyncerCase(unittest.TestCase):
     def ingest(self):
         return ingest_pdf(self.service.store, self.service.data, self.docid, self.pdf)
 
-    def request(self, path, method='GET', body=None, origin=None, host='localhost:4387', raw=None, filename=None, cookie=None):
+    def request(self, path, method='GET', body=None, origin=None, host='localhost:4387', raw=None, filename=None, cookie=None, headers=None):
         handler = Handler.__new__(Handler)
         handler.server = SimpleNamespace(service=self.service, allowed_hosts=self.allowed_hosts, server_port=4387, web_auth=self.web_auth)
         handler.headers = Message()
@@ -147,6 +148,8 @@ class SyncerCase(unittest.TestCase):
         handler.headers['Content-Length'] = str(len(payload))
         if filename:
             handler.headers['X-Filename'] = filename
+        for key, value in (headers or {}).items():
+            handler.headers[key] = value
         handler.path = path
         handler.command = method
         handler.request_version = 'HTTP/1.1'
@@ -817,6 +820,40 @@ class SyncerCase(unittest.TestCase):
         status,body=self.request('/api/upload','POST',raw=self.pdf.read_bytes(),filename='test.pdf')
         self.assertEqual(status,202)
         self.assertTrue(json.loads(body)['queued'])
+        _,kind,argument,_=self.service.tasks.get_nowait()
+        self.assertEqual((kind,argument['folder']),('upload',self.service.settings()['upload_folder']))
+
+    def test_upload_goes_to_the_chosen_folder_inside_sync_scope(self):
+        self.service.save_settings({'sync_folders':['Document/工作']})
+        upload=lambda folder: self.request('/api/upload','POST',raw=self.pdf.read_bytes(),filename='test.pdf',
+                                           headers={'X-Folder':quote(folder)})
+        status,_=upload('Document/工作/项目')
+        self.assertEqual(status,202)
+        _,kind,argument,_=self.service.tasks.get_nowait()
+        self.assertEqual((kind,argument['folder']),('upload','Document/工作/项目'))
+        self.assertTrue(Path(argument['path']).is_file())
+        for folder in ['Document/工作备份','Document','Document/工作/../私人','Document/工作/a.pdf']:
+            self.assertEqual(upload(folder)[0],400,folder)
+        self.assertTrue(self.service.tasks.empty())
+        # The scope can shrink while the upload waits; it must not reach the device then.
+        self.service.save_settings({'sync_folders':['Document/工作/其他']})
+        self.service.device.upload=Mock()
+        with self.assertRaisesRegex(ValueError,'不在同步范围'):
+            self.service.upload(argument['path'],argument['folder'])
+        self.service.device.upload.assert_not_called()
+        self.assertFalse(Path(argument['path']).exists())
+
+    def test_upload_job_sends_to_its_folder(self):
+        self.service.save_settings({'sync_folders':['Document/工作']})
+        remote='Document/工作/项目/note.pdf'
+        self.service.device.upload=Mock(return_value=dict(self.entry,entry_path=remote,entry_id='uploaded'))
+        self.service.sync=Mock(return_value=dict(errors=['stop after upload']))
+        staged=self.root/'staged.pdf'
+        shutil.copy(self.pdf,staged)
+        with self.assertRaisesRegex(RuntimeError,'回读校验失败'):
+            self.service.upload(staged,'Document/工作/项目')
+        self.assertEqual(self.service.device.upload.call_args.args,(staged,'Document/工作/项目'))
+        self.assertEqual(self.service.store.document_at(remote)['tracked'],1)
 
     def test_relocation_preserves_data_and_changes_all_asset_paths(self):
         self.ingest()

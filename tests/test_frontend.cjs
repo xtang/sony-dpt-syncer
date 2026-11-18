@@ -184,8 +184,25 @@ assert(folderMarkup.includes('已包含在上级目录中'));
 assert(folderMarkup.includes('data-folder="Document/工作" checked'));
 assert(!folderMarkup.includes('data-folder="Document/工作备份" checked'));
 
+// Upload target: saved scope only, the configured default preselected, a manual choice kept.
+run('state.app={settings:{sync_folders:["Document/工作"],upload_folder:"Document/工作/收件箱"}};state.folders.push({path:"Document",documents:6});renderFolders()');
+const uploadOptions=element('#upload-folder').innerHTML;
+for (const path of ['Document/工作','Document/工作/项目','Document/工作/收件箱']) assert(uploadOptions.includes(`value="${path}"`),path);
+for (const path of ['Document','Document/工作备份']) assert(!uploadOptions.includes(`value="${path}"`),path);
+assert(uploadOptions.includes('Document/工作/收件箱（默认）'));
+assert.equal(element('#upload-folder').value,'Document/工作/收件箱');
+assert.equal(element('#upload-folder').disabled,false);
+run('state.uploadFolder="Document/工作/项目";renderFolders()');
+assert.equal(element('#upload-folder').value,'Document/工作/项目','a chosen folder survives re-rendering');
+run('state.app.settings.sync_folders=["Document/工作备份"];state.app.settings.upload_folder="Document/工作备份";renderFolders()');
+assert.equal(element('#upload-folder').value,'Document/工作备份','a choice outside the saved scope falls back to the default');
+run('state.app.settings.sync_folders=[];renderUploadFolders()');
+assert.equal(element('#upload-folder').disabled,true);
+assert.equal(element('#upload-folder').value,'');
+run('state.uploadFolder=null;state.app=null');
+
 // Device files and the bulk action bar.
-for (const id of ['folder-list','folder-path','folder-options','folder-summary','new-folder-path','move-target','move-files-button','move-selection-count','select-visible-files','file-search','tracked-only','file-count','file-list','pdf-upload','bulk-bar','note-nav','note-search','nav-count','count-all','count-unread','count-pending','count-needs_review','count-ignored','ink-zoom','page-label','unread-badge']) assert(html.includes(`id="${id}"`),id);
+for (const id of ['folder-list','folder-path','folder-options','folder-summary','new-folder-path','move-target','move-files-button','move-selection-count','select-visible-files','file-search','tracked-only','file-count','file-list','pdf-upload','upload-folder','bulk-bar','note-nav','note-search','nav-count','count-all','count-unread','count-pending','count-needs_review','count-ignored','ink-zoom','page-label','unread-badge']) assert(html.includes(`id="${id}"`),id);
 for (const action of ['create-folder','move-files','clear-file-selection','save-scope','clear-scope','add-folder','refresh-folders']) assert(html.includes(`data-action="${action}"`),action);
 for (const filter of ['all','unread','pending','needs_review','ignored']) assert(html.includes(`data-filter="${filter}"`),filter);
 assert(!html.includes('id="stats"'));
