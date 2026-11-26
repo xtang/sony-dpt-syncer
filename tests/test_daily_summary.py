@@ -197,7 +197,7 @@ class DailySummaryTests(unittest.TestCase):
 class SummaryModelTests(unittest.TestCase):
     def test_batches_include_every_note_and_merge(self):
         client = ModelClient(lambda: {})
-        client.completion = Mock(return_value={'markdown': '## 摘要\n\n保留来源。'})
+        client.completion = Mock(return_value='## 摘要\n\n保留来源。')
         sources = [dict(id=i, document='文档', page=1, title='笔记', evidence=['网页查看'], status='needs_review',
                         confirmation_stale=True, transcript='字'*1600, question='问'*800, anchor='文'*1600, answer={'explanation':'答'*6000}) for i in range(8)]
         result = client.summarize_day('2020-04-01', 'UTC', sources)
@@ -210,12 +210,13 @@ class SummaryModelTests(unittest.TestCase):
                 self.assertTrue(all(note['confirmation_stale'] for note in data))
         self.assertEqual(seen, list(range(8)))
         self.assertGreater(client.completion.call_count, 1)
+        self.assertTrue(all(call.kwargs == dict(thinking=False, structured=False) for call in client.completion.call_args_list))
 
     def test_rejects_empty_or_malformed_model_summary(self):
         client = ModelClient(lambda: {})
         source = dict(id=1, document='x', page=1, title='t', evidence=[], status='pending', confirmation_stale=False,
                       transcript='', question='', anchor='', answer=None)
-        for result in [{}, {'markdown': ''}, {'markdown': []}]:
+        for result in ['', ' \n', {'markdown': '## 摘要'}, '字'*12001]:
             client.completion = Mock(return_value=result)
             with self.assertRaises(ModelError):
                 client.summarize_day('2020-04-01', 'UTC', [source])

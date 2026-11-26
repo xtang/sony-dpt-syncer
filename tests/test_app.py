@@ -1560,6 +1560,9 @@ class ModelTests(unittest.TestCase):
         session.post.return_value=response('{"ok":true}')
         client.completion([])
         self.assertEqual(session.post.call_args.kwargs['json']['response_format'],{'type':'json_object'})
+        session.post.return_value=response('<think>plan</think>\n```markdown\n## 摘要\n\n正文\n```')
+        self.assertEqual(client.completion([],structured=False),'## 摘要\n\n正文')
+        self.assertNotIn('response_format',session.post.call_args.kwargs['json'])
 
     def test_thinking_switch_is_dropped_when_rejected_and_never_sent_to_openai(self):
         def response(status,payload):
