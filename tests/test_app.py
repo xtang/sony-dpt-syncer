@@ -1528,35 +1528,38 @@ class ModelTests(unittest.TestCase):
         def response(status,payload):
             result=requests.Response();result.status_code=status;result._content=json.dumps(payload).encode();return result
         session=Mock()
-        session.post.side_effect=[response(400,{'error':'use max_completion_tokens instead of max_tokens'}),response(400,{'error':'response_format unsupported'}),response(200,{'choices':[{'message':{'content':'{"ok":true}'}}]})]
+        ok=response(200,{'choices':[{'message':{'content':'{"ok":true}'}}]})
+        session.post.side_effect=[response(400,{'error':'use max_completion_tokens instead of max_tokens'}),ok]
         config=dict(model_base_url='https://compatible.example/v1',model_name='vision',model_api_key='secret-123')
         client=ModelClient(lambda:config,session)
         self.assertEqual(client.completion([{'role':'user','content':'JSON'}]),{'ok':True})
-        self.assertEqual(session.post.call_count,3)
+        self.assertEqual(session.post.call_count,2)
+        self.assertIn('max_completion_tokens',session.post.call_args.kwargs['json'])
+        official=dict(config,model_base_url='https://api.openai.com/v1')
+        session.post.side_effect=[response(400,{'error':'response_format unsupported'}),ok]
+        self.assertEqual(ModelClient(lambda:official,session).completion([]),{'ok':True})
+        self.assertNotIn('response_format',session.post.call_args.kwargs['json'])
         session.post.side_effect=None
         session.post.return_value=response(401,{'error':'bad secret-123'})
         with self.assertRaises(ModelError) as error: client.completion([])
         self.assertNotIn('secret-123',str(error.exception))
 
-    def test_junk_json_mode_reply_retries_without_response_format_and_is_remembered(self):
+    def test_json_mode_is_only_requested_from_openai(self):
         def response(content):
             result=requests.Response();result.status_code=200;result._content=json.dumps({'choices':[{'message':{'content':content}}]}).encode();return result
-        # The client edits one request body in place, so record each body as it is sent.
-        bodies=[];replies=[response('[1]'),response('<think>plan</think>\n{"ok":true}'),response('{"ok":true}')]
-        def post(url,json,**kwargs):
-            bodies.append(dict(json));return replies.pop(0)
         session=Mock()
-        session.post.side_effect=post
         config=dict(model_base_url='https://local.example/v1',model_name='vision')
         client=ModelClient(lambda:config,session)
+        session.post.return_value=response('<think>plan</think>\n{"ok":true}')
         self.assertEqual(client.completion([{'role':'user','content':'JSON'}]),{'ok':True})
-        self.assertEqual(client.completion([{'role':'user','content':'JSON'}],thinking=False),{'ok':True})
-        self.assertEqual(['response_format' in body for body in bodies],[True,False,False])
-        self.assertEqual(['chat_template_kwargs' in body for body in bodies],[False,False,True])
-        replies+=[response('junk'),response('still junk')]
-        config['model_name']='other'
+        self.assertNotIn('response_format',session.post.call_args.kwargs['json'])
+        session.post.return_value=response('[1]')
         with self.assertRaises(ModelError): client.completion([])
-        self.assertEqual(session.post.call_count,5)
+        self.assertEqual(session.post.call_count,2)
+        config['model_base_url']='https://api.openai.com/v1'
+        session.post.return_value=response('{"ok":true}')
+        client.completion([])
+        self.assertEqual(session.post.call_args.kwargs['json']['response_format'],{'type':'json_object'})
 
     def test_thinking_switch_is_dropped_when_rejected_and_never_sent_to_openai(self):
         def response(status,payload):

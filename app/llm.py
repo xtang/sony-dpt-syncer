@@ -106,8 +106,6 @@ class ModelClient:
     def __init__(self, config, session=None):
         self.config = config
         self.session = session or requests.Session()
-        # Services whose JSON mode returned unusable content; later requests rely on the prompt alone.
-        self.plain_json = set()
 
     def ready(self):
         config = self.config()
@@ -123,21 +121,22 @@ class ModelClient:
         if key:
             headers["Authorization"] = "Bearer "+key
         official = urlsplit(base).hostname == "api.openai.com"
-        target = (base, config["model_name"])
         body = {"model": config["model_name"], "messages": messages,
                 "max_completion_tokens" if official else "max_tokens": limit}
-        if target not in self.plain_json:
+        if official:
+            # Other servers get JSON from the prompt alone: grammar-constrained JSON modes skip a
+            # reasoning model's thinking and return junk objects or run to the output limit.
             body["response_format"] = {"type": "json_object"}
-        if not thinking and not official:
+        elif not thinking:
             # Understood by local chat-template servers (omlx, vLLM, llama.cpp); dropped below if rejected.
             body["chat_template_kwargs"] = {"enable_thinking": False}
-        for attempt in range(5):
+        for attempt in range(3):
             try:
                 # Local models can need several minutes for a long answer.
                 response = self.session.post(base+"/chat/completions", json=body, headers=headers, timeout=(10, 300))
             except requests.RequestException as error:
                 raise ModelError("无法连接模型服务，请检查地址、网络和服务状态") from error
-            if response.status_code == 400 and attempt < 4:
+            if response.status_code == 400 and attempt < 2:
                 message = response.text[:2000]
                 if "max_tokens" in body and "max_completion_tokens" in message:
                     body["max_completion_tokens"] = body.pop("max_tokens")
@@ -166,14 +165,7 @@ class ModelClient:
                     content = "".join(part.get("text", "") for part in content)
             except (KeyError, IndexError, ValueError, TypeError) as error:
                 raise ModelError("模型服务返回格式不兼容") from error
-            try:
-                return parse_json(content)
-            except ModelError:
-                # Some servers answer 200 with junk (e.g. "[1]") in JSON mode; retry once on the prompt alone.
-                if "response_format" not in body or attempt == 4:
-                    raise
-                body.pop("response_format")
-                self.plain_json.add(target)
+            return parse_json(content)
         raise ModelError("模型参数不兼容，请检查服务说明")
 
     def test(self):
