@@ -1538,6 +1538,41 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ModelError) as error: client.completion([])
         self.assertNotIn('secret-123',str(error.exception))
 
+    def test_junk_json_mode_reply_retries_without_response_format_and_is_remembered(self):
+        def response(content):
+            result=requests.Response();result.status_code=200;result._content=json.dumps({'choices':[{'message':{'content':content}}]}).encode();return result
+        # The client edits one request body in place, so record each body as it is sent.
+        bodies=[];replies=[response('[1]'),response('<think>plan</think>\n{"ok":true}'),response('{"ok":true}')]
+        def post(url,json,**kwargs):
+            bodies.append(dict(json));return replies.pop(0)
+        session=Mock()
+        session.post.side_effect=post
+        config=dict(model_base_url='https://local.example/v1',model_name='vision')
+        client=ModelClient(lambda:config,session)
+        self.assertEqual(client.completion([{'role':'user','content':'JSON'}]),{'ok':True})
+        self.assertEqual(client.completion([{'role':'user','content':'JSON'}],thinking=False),{'ok':True})
+        self.assertEqual(['response_format' in body for body in bodies],[True,False,False])
+        self.assertEqual(['chat_template_kwargs' in body for body in bodies],[False,False,True])
+        replies+=[response('junk'),response('still junk')]
+        config['model_name']='other'
+        with self.assertRaises(ModelError): client.completion([])
+        self.assertEqual(session.post.call_count,5)
+
+    def test_thinking_switch_is_dropped_when_rejected_and_never_sent_to_openai(self):
+        def response(status,payload):
+            result=requests.Response();result.status_code=status;result._content=json.dumps(payload).encode();return result
+        ok=response(200,{'choices':[{'message':{'content':'{"ok":true}'}}]})
+        session=Mock()
+        session.post.side_effect=[response(400,{'error':'unknown field chat_template_kwargs'}),ok]
+        config=dict(model_base_url='https://compatible.example/v1',model_name='vision')
+        client=ModelClient(lambda:config,session)
+        self.assertEqual(client.completion([],thinking=False),{'ok':True})
+        self.assertNotIn('chat_template_kwargs',session.post.call_args.kwargs['json'])
+        config['model_base_url']='https://api.openai.com/v1'
+        session.post.side_effect=[ok]
+        client.completion([],thinking=False)
+        self.assertNotIn('chat_template_kwargs',session.post.call_args.kwargs['json'])
+
     def test_device_pdf_time_parsing(self):
         self.assertEqual(pdf_date("D:20261112094848+08'00'").utcoffset(),timedelta(hours=8))
         self.assertFalse(trusted_date('D:20000601000000Z'))

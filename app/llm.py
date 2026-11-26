@@ -37,6 +37,8 @@ def validate_model_url(value):
 
 def parse_json(content):
     text = str(content).strip()
+    # Local reasoning models may leave their thinking inline ahead of the answer.
+    text = re.sub(r"^<think>.*?</think>", "", text, flags=re.S).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
@@ -104,12 +106,14 @@ class ModelClient:
     def __init__(self, config, session=None):
         self.config = config
         self.session = session or requests.Session()
+        # Services whose JSON mode returned unusable content; later requests rely on the prompt alone.
+        self.plain_json = set()
 
     def ready(self):
         config = self.config()
         return bool(config.get("model_base_url") and config.get("model_name"))
 
-    def completion(self, messages, limit=2500):
+    def completion(self, messages, limit=2500, thinking=True):
         config = self.config()
         if not self.ready():
             raise ModelError("先在设置中填写模型服务地址和模型名称")
@@ -118,21 +122,31 @@ class ModelClient:
         key = config.get("model_api_key", "")
         if key:
             headers["Authorization"] = "Bearer "+key
-        parameter = "max_completion_tokens" if urlsplit(base).hostname == "api.openai.com" else "max_tokens"
-        body = {"model": config["model_name"], "messages": messages, parameter: limit,
-                "response_format": {"type": "json_object"}}
-        for attempt in range(3):
+        official = urlsplit(base).hostname == "api.openai.com"
+        target = (base, config["model_name"])
+        body = {"model": config["model_name"], "messages": messages,
+                "max_completion_tokens" if official else "max_tokens": limit}
+        if target not in self.plain_json:
+            body["response_format"] = {"type": "json_object"}
+        if not thinking and not official:
+            # Understood by local chat-template servers (omlx, vLLM, llama.cpp); dropped below if rejected.
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        for attempt in range(5):
             try:
-                response = self.session.post(base+"/chat/completions", json=body, headers=headers, timeout=(10, 150))
+                # Local models can need several minutes for a long answer.
+                response = self.session.post(base+"/chat/completions", json=body, headers=headers, timeout=(10, 300))
             except requests.RequestException as error:
                 raise ModelError("无法连接模型服务，请检查地址、网络和服务状态") from error
-            if response.status_code == 400 and attempt < 2:
+            if response.status_code == 400 and attempt < 4:
                 message = response.text[:2000]
                 if "max_tokens" in body and "max_completion_tokens" in message:
                     body["max_completion_tokens"] = body.pop("max_tokens")
                     continue
                 if "response_format" in body and "response_format" in message:
                     body.pop("response_format")
+                    continue
+                if "chat_template_kwargs" in body and ("chat_template_kwargs" in message or "enable_thinking" in message):
+                    body.pop("chat_template_kwargs")
                     continue
             if not response.ok:
                 detail = response.text[:450]
@@ -152,7 +166,14 @@ class ModelClient:
                     content = "".join(part.get("text", "") for part in content)
             except (KeyError, IndexError, ValueError, TypeError) as error:
                 raise ModelError("模型服务返回格式不兼容") from error
-            return parse_json(content)
+            try:
+                return parse_json(content)
+            except ModelError:
+                # Some servers answer 200 with junk (e.g. "[1]") in JSON mode; retry once on the prompt alone.
+                if "response_format" not in body or attempt == 4:
+                    raise
+                body.pop("response_format")
+                self.plain_json.add(target)
         raise ModelError("模型参数不兼容，请检查服务说明")
 
     def test(self):
@@ -172,7 +193,7 @@ class ModelClient:
 
         def summarize(content):
             result = self.completion([{'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': json.dumps(dict(date=day, timezone=zone, material=content), ensure_ascii=False)}], 4500)
+                {'role': 'user', 'content': json.dumps(dict(date=day, timezone=zone, material=content), ensure_ascii=False)}], 8000, thinking=False)
             markdown = result.get('markdown')
             if not isinstance(markdown, str) or not markdown.strip() or len(markdown) > 12000:
                 raise ModelError('模型未返回有效的每日总结正文，请重试')
@@ -228,7 +249,7 @@ anchor记录对应题干和选项，question补全为核对这道题的作答。
         result = self.completion([
             {"role": "system", "content": prompt},
             {"role": "user", "content": content}
-        ], 2200)
+        ], 6000)
         try:
             confidence = float(result.get("confidence", 0))
         except (ValueError, TypeError):
@@ -278,7 +299,7 @@ tags（字符串数组），uncertainties（字符串数组），sources（字�
         for key in ("model_preview_path", "page_image_path"):
             if note.get(key):
                 content.append(image_content(note[key]))
-        result = self.completion([{"role": "system", "content": prompt}, {"role": "user", "content": content}], 6500)
+        result = self.completion([{"role": "system", "content": prompt}, {"role": "user", "content": content}], 16000)
         if not isinstance(result.get("summary"), str) or not isinstance(result.get("explanation"), str):
             raise ModelError("解读缺少摘要或说明，请重试")
         for name in ("examples", "tags", "uncertainties", "sources"):
